@@ -22,9 +22,9 @@ import (
 	"testing"
 )
 
-func TestGlobDocumentsFindsPDFAndDOCXOnly(t *testing.T) {
+func TestGlobDocumentsFindsPDFDOCXAndMDOnly(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"a.pdf", "b.docx", "c.txt", "d.PDF"} {
+	for _, name := range []string{"a.pdf", "b.docx", "c.md", "d.txt", "e.PDF"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
 			t.Fatalf("write fixture %s: %v", name, err)
 		}
@@ -39,7 +39,7 @@ func TestGlobDocumentsFindsPDFAndDOCXOnly(t *testing.T) {
 	for _, p := range got {
 		names = append(names, filepath.Base(p))
 	}
-	want := []string{"a.pdf", "b.docx"}
+	want := []string{"a.pdf", "b.docx", "c.md"}
 	if len(names) != len(want) {
 		t.Fatalf("got %v, want %v", names, want)
 	}
@@ -47,6 +47,29 @@ func TestGlobDocumentsFindsPDFAndDOCXOnly(t *testing.T) {
 		if names[i] != want[i] {
 			t.Errorf("names[%d] = %q, want %q", i, names[i], want[i])
 		}
+	}
+}
+
+func TestReadEvalSourceParsesCrawlMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "page.md")
+	content := "---\nurl: https://example.com/page\ncrawled: 2026-01-01T00:00:00Z\n---\n\n## Heading\n\nBody paragraph.\n\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	paras, err := readEvalSource(path)
+	if err != nil {
+		t.Fatalf("readEvalSource: %v", err)
+	}
+	if len(paras) != 2 {
+		t.Fatalf("got %d paragraphs, want 2: %+v", len(paras), paras)
+	}
+	if !paras[0].Heading || paras[0].Text != "Heading" {
+		t.Errorf("paras[0] = %+v, want heading %q", paras[0], "Heading")
+	}
+	if paras[1].Heading || paras[1].Text != "Body paragraph." {
+		t.Errorf("paras[1] = %+v, want body %q", paras[1], "Body paragraph.")
 	}
 }
 

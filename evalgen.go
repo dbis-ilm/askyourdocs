@@ -42,7 +42,7 @@ type EvalCase[In any] struct {
 // GenerateEvalSetInput configures GenerateEvalSet: which documents to draw
 // questions from and how densely to sample their chunks.
 type GenerateEvalSetInput struct {
-	Dir        string `json:"dir,omitempty"`        // directory of .pdf/.docx files to read; default "./pdf-data"
+	Dir        string `json:"dir,omitempty"`        // directory of .pdf/.docx/.md files to read; default "./pdf-data"
 	SampleRate int    `json:"sampleRate,omitempty"` // take every Nth chunk per document; default 4
 	MaxPerDoc  int    `json:"maxPerDoc,omitempty"`  // cap questions generated per document; default 8
 	OutPath    string `json:"outPath,omitempty"`    // dataset output path; default "testdata/eval_dataset_generated.json"
@@ -55,8 +55,10 @@ type GenerateEvalSetResult struct {
 	Skipped   int    `json:"skipped"` // chunks where the LLM response could not be parsed
 }
 
-// GenerateEvalSet turns the PDFs and .docx files in cfg.Dir into a
-// question/reference-answer dataset for `genkit eval:flow`. For a sample of
+// GenerateEvalSet turns the PDFs, .docx files, and cached crawl-data
+// Markdown files (as RunCrawl writes with SAVE_CRAWL_DATA=1 — see
+// ReindexCrawlData) in cfg.Dir into a question/reference-answer dataset for
+// `genkit eval:flow`. For a sample of
 // chunks per document it asks the LLM (via genOpts — typically
 // []ai.GenerateOption{ai.WithModel(llm), ai.WithConfig(modelConfig)}) for one
 // question that chunk answers plus a short reference answer, grounded only
@@ -89,14 +91,14 @@ func GenerateEvalSet[In any](ctx context.Context, genk *genkit.Genkit, genOpts [
 		return GenerateEvalSetResult{}, err
 	}
 	if len(paths) == 0 {
-		return GenerateEvalSetResult{}, fmt.Errorf("no PDFs or .docx files found in %s", dir)
+		return GenerateEvalSetResult{}, fmt.Errorf("no PDFs, .docx or crawl-data .md files found in %s", dir)
 	}
 
 	var cases []EvalCase[In]
 	skipped := 0
 	for _, path := range paths {
 		docName := filepath.Base(path)
-		paras, err := ExtractParagraphs(path)
+		paras, err := readEvalSource(path)
 		if err != nil {
 			log.Printf("[GenerateEvalSet] %s: read failed: %v", docName, err)
 			continue
@@ -146,20 +148,34 @@ func GenerateEvalSet[In any](ctx context.Context, genk *genkit.Genkit, genOpts [
 	}, nil
 }
 
-// globDocuments returns every .pdf and .docx path directly inside dir,
-// sorted — the same two extensions ExtractParagraphs knows how to read.
+// globDocuments returns every .pdf, .docx and .md path directly inside dir,
+// sorted — readEvalSource knows how to read all three.
 func globDocuments(dir string) ([]string, error) {
-	pdfPaths, err := filepath.Glob(filepath.Join(dir, "*.pdf"))
-	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", dir, err)
+	var paths []string
+	for _, pattern := range []string{"*.pdf", "*.docx", "*.md"} {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			return nil, fmt.Errorf("glob %s: %w", dir, err)
+		}
+		paths = append(paths, matches...)
 	}
-	docxPaths, err := filepath.Glob(filepath.Join(dir, "*.docx"))
-	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", dir, err)
-	}
-	paths := append(pdfPaths, docxPaths...)
 	sort.Strings(paths)
 	return paths, nil
+}
+
+// readEvalSource extracts paragraphs from a document GenerateEvalSet can
+// sample from: ExtractParagraphs for a PDF/.docx, or parseCrawlMarkdown for a
+// cached crawl-data file (see RunCrawl's SAVE_CRAWL_DATA).
+func readEvalSource(path string) ([]Paragraph, error) {
+	if strings.EqualFold(filepath.Ext(path), ".md") {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		_, paras, err := parseCrawlMarkdown(string(content))
+		return paras, err
+	}
+	return ExtractParagraphs(path)
 }
 
 // generateQAPair asks the LLM for one question the given text answers,
