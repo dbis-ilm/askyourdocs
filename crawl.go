@@ -293,10 +293,10 @@ func parseCrawlMarkdown(content string) (pageURL string, paras []Paragraph, err 
 	return pageURL, paras, nil
 }
 
-// removeBoilerplateParas identifies paragraphs that appear on multiple pages
-// and removes them. A non-heading paragraph appearing on more than 1 page is
-// considered boilerplate (e.g. sidebar navigation, footer teasers, faculty
-// cards that repeat across a site).
+// removeBoilerplateParas identifies paragraphs that repeat across a real
+// fraction of the crawl — sidebar navigation, footer teasers, repeated
+// cards, the kind of chrome that appears on nearly every page — and removes
+// them.
 func removeBoilerplateParas(pages []crawledPage) {
 	// Count on how many pages each paragraph text appears.
 	paraPageCount := make(map[string]int)
@@ -314,7 +314,24 @@ func removeBoilerplateParas(pages []crawledPage) {
 		}
 	}
 
-	// Remove paragraphs that appear on more than 1 page.
+	// A paragraph counts as boilerplate only once it repeats across a real
+	// fraction (20%) of the crawled pages — not just because it happens to
+	// repeat at all. A small group of closely related pages (e.g. a staff
+	// directory's several contact/"Vorzimmer" sub-sections) legitimately
+	// shares short paragraphs — addresses, room numbers, phone/email lines —
+	// across a handful of pages without any of it being site-wide chrome; a
+	// flat "appears on more than 1 page" threshold stripped exactly that
+	// content wholesale from a real crawl (every non-heading line repeated
+	// anywhere on the site vanished, including a university's entire
+	// executive board page down to just two of its five members). minPages
+	// floors at 1, so a small crawl (5 pages or fewer) keeps the original,
+	// stricter "appears more than once" behavior.
+	minPages := len(pages) / 5
+	if minPages < 1 {
+		minPages = 1
+	}
+
+	// Remove paragraphs repeating on more than minPages pages.
 	for i := range pages {
 		filtered := make([]Paragraph, 0, len(pages[i].paras))
 		for _, para := range pages[i].paras {
@@ -322,7 +339,7 @@ func removeBoilerplateParas(pages []crawledPage) {
 				filtered = append(filtered, para)
 				continue
 			}
-			if paraPageCount[strings.TrimSpace(para.Text)] <= 1 {
+			if paraPageCount[strings.TrimSpace(para.Text)] <= minPages {
 				filtered = append(filtered, para)
 			}
 		}

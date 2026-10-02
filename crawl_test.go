@@ -185,6 +185,54 @@ func TestRemoveBoilerplateParas(t *testing.T) {
 	}
 }
 
+// On a large crawl, a short paragraph shared by only a handful of closely
+// related pages (an address, a room number — the kind of thing a staff
+// directory's several contact sub-pages legitimately repeat) must survive;
+// only a paragraph repeating across a real fraction of the crawl (true
+// site-wide chrome) should be stripped. Reproduces the bug found live
+// against a university's executive board page, where a flat ">1 page"
+// threshold stripped every contact detail that happened to also appear on
+// any other staff page site-wide, leaving only 2 of 5 board members with any
+// content at all.
+func TestRemoveBoilerplateParasOnLargeCrawlKeepsNarrowlySharedContent(t *testing.T) {
+	pages := make([]crawledPage, 20)
+	for i := range pages {
+		pages[i] = crawledPage{
+			url: fmt.Sprintf("page-%d", i),
+			paras: []Paragraph{
+				{Text: "Site-wide nav footer, on every page"},
+				{Text: fmt.Sprintf("Unique content on page %d", i)},
+			},
+		}
+	}
+	// A short contact detail shared by exactly 4 of the 20 pages — e.g. four
+	// staff members in the same building — must not be treated as chrome.
+	for i := 0; i < 4; i++ {
+		pages[i].paras = append(pages[i].paras, Paragraph{Text: "Ehrenbergstraße 29 (Ernst-Abbe-Zentrum)"})
+	}
+
+	removeBoilerplateParas(pages)
+
+	for i, p := range pages {
+		for _, para := range p.paras {
+			if strings.TrimSpace(para.Text) == "Site-wide nav footer, on every page" {
+				t.Errorf("page %d still has true site-wide boilerplate", i)
+			}
+		}
+	}
+	for i := 0; i < 4; i++ {
+		found := false
+		for _, para := range pages[i].paras {
+			if strings.TrimSpace(para.Text) == "Ehrenbergstraße 29 (Ernst-Abbe-Zentrum)" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("page %d lost its narrowly-shared address paragraph — only shared by 4/20 pages, not boilerplate", i)
+		}
+	}
+}
+
 func TestRemoveBoilerplateParasDoesNotAffectUniqueContent(t *testing.T) {
 	pages := []crawledPage{
 		{url: "a", paras: []Paragraph{{Text: "Only on A"}}},
