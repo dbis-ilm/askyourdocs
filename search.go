@@ -169,6 +169,7 @@ func LocalvecKeywordSearch(dbPath string, query string, maxResults int, stopWord
 	}
 
 	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
+	results = capPerDocument(results, maxPerDocument, func(r scored) string { return documentKey(r.doc.Metadata) })
 
 	if len(results) > maxResults {
 		results = results[:maxResults]
@@ -178,6 +179,46 @@ func LocalvecKeywordSearch(dbPath string, query string, maxResults int, stopWord
 		docs[i] = r.doc
 	}
 	return docs, nil
+}
+
+// maxPerDocument caps how many results from the same document (identified by
+// documentKey) a keyword search keeps before the final maxResults cutoff —
+// without it, a document that happens to repeat a matched term often (or
+// simply has many chunks) can fill the whole result budget on its own and
+// starve out an equally or more relevant document that only matches once or
+// twice. Found live: a generic portal page with 17 chunks mentioning
+// "Fakultäten" crowded a specific faculty's own page (3 matching chunks)
+// out of a 20-result keyword search entirely.
+const maxPerDocument = 3
+
+// documentKey identifies which indexed document a chunk's metadata belongs
+// to — "url" for a crawled page, "source" for an uploaded file — so results
+// can be diversified across documents instead of just ranked chunk by chunk.
+func documentKey(meta map[string]any) string {
+	if v, ok := meta["url"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := meta["source"].(string); ok && v != "" {
+		return v
+	}
+	return ""
+}
+
+// capPerDocument keeps only the first maxPer entries per key(item) from
+// items, preserving order — items is expected to already be sorted by
+// relevance, so "first" means "best" per document.
+func capPerDocument[T any](items []T, maxPer int, key func(T) string) []T {
+	seen := make(map[string]int, len(items))
+	kept := items[:0]
+	for _, item := range items {
+		k := key(item)
+		if seen[k] >= maxPer {
+			continue
+		}
+		seen[k]++
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 // scanKeywordQuery runs q against pool and scans its rows with ScanDocs,
@@ -204,8 +245,12 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 //     independently — so a high-frequency keyword can't dilute the ranking
 //     of a more specific one sharing the same query.
 //
-// Results from all three are merged and deduplicated by document text, then
-// capped at maxResults. language is a Postgres text-search configuration
+// Each stage keeps at most maxPerDocument rows per document (see its doc
+// comment) before its own LIMIT applies, so one document with many matching
+// chunks can't single-handedly fill the result budget and starve out a
+// document that only matches once or twice. Results from all three stages
+// are then merged and deduplicated by document text, and capped at
+// maxResults overall. language is a Postgres text-search configuration
 // name ("german", "english", "simple", ...) — always a fixed string the
 // caller controls, never user input, so it's safe to interpolate into the
 // query text (bind parameters don't support configuration names). extraWhere
@@ -242,12 +287,28 @@ func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, max
 		}
 	}
 
+	// docKey is the same "which document is this chunk part of" concept
+	// documentKey uses for the localvec path, expressed in SQL — a crawled
+	// page keys off its url, an uploaded file off its source name.
+	const docKey = `COALESCE(metadata->>'url', metadata->>'source', '')`
+
+	// Every stage below partitions its matches by docKey and keeps only the
+	// best maxPerDocument rows per document (see maxPerDocument's doc
+	// comment) before applying the overall LIMIT — otherwise a document
+	// that simply has many matching chunks can fill the entire per-query
+	// budget by itself and starve out an equally relevant document with
+	// only one or two matches.
+
 	// 1. Exact phrase ILIKE (quoted strings, priority).
-	qPhrase := `
-SELECT content, metadata, parent_text
-FROM documents
-WHERE LOWER(content || ' ' || parent_text) LIKE $1` + filterClause + `
-LIMIT $2`
+	qPhrase := fmt.Sprintf(`
+WITH matches AS (
+    SELECT content, metadata, parent_text,
+           row_number() OVER (PARTITION BY %[1]s ORDER BY id) AS rn
+    FROM documents
+    WHERE LOWER(content || ' ' || parent_text) LIKE $1%[2]s
+)
+SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
+LIMIT $2`, docKey, filterClause, maxPerDocument)
 	for _, phrase := range phrases {
 		if len(docs) >= maxResults {
 			break
@@ -261,11 +322,15 @@ LIMIT $2`
 	}
 
 	// 2. ILIKE on long keywords.
-	qILIKE := `
-SELECT content, metadata, parent_text
-FROM documents
-WHERE LOWER(content || ' ' || parent_text) LIKE $1` + filterClause + `
-LIMIT $2`
+	qILIKE := fmt.Sprintf(`
+WITH matches AS (
+    SELECT content, metadata, parent_text,
+           row_number() OVER (PARTITION BY %[1]s ORDER BY id) AS rn
+    FROM documents
+    WHERE LOWER(content || ' ' || parent_text) LIKE $1%[2]s
+)
+SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
+LIMIT $2`, docKey, filterClause, maxPerDocument)
 	for _, kw := range keywords {
 		if len(kw) < 8 || len(docs) >= maxResults {
 			continue
@@ -284,15 +349,20 @@ LIMIT $2`
 
 	// 3. Full-text search, one query per keyword.
 	qFTS := fmt.Sprintf(`
-SELECT content, metadata, parent_text
-FROM documents
-WHERE to_tsvector('%s', content || ' ' || parent_text)
-      @@ websearch_to_tsquery('%s', $1)%s
-ORDER BY ts_rank(
-    to_tsvector('%s', content || ' ' || parent_text),
-    websearch_to_tsquery('%s', $1)
-) DESC
-LIMIT $2`, language, language, filterClause, language, language)
+WITH matches AS (
+    SELECT content, metadata, parent_text,
+           ts_rank(to_tsvector('%[1]s', content || ' ' || parent_text), websearch_to_tsquery('%[1]s', $1)) AS rank,
+           row_number() OVER (
+               PARTITION BY %[3]s
+               ORDER BY ts_rank(to_tsvector('%[1]s', content || ' ' || parent_text), websearch_to_tsquery('%[1]s', $1)) DESC
+           ) AS rn
+    FROM documents
+    WHERE to_tsvector('%[1]s', content || ' ' || parent_text) @@ websearch_to_tsquery('%[1]s', $1)%[2]s
+)
+SELECT content, metadata, parent_text FROM matches
+WHERE rn <= %[4]d
+ORDER BY rank DESC
+LIMIT $2`, language, filterClause, docKey, maxPerDocument)
 	for _, kw := range keywords {
 		if len(docs) >= maxResults {
 			break

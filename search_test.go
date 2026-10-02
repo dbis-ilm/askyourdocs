@@ -174,6 +174,38 @@ func TestLocalvecKeywordSearchSortsByScore(t *testing.T) {
 	}
 }
 
+// A page that happens to repeat the matched term in many chunks must not
+// crowd a different, equally matching page out of the results entirely —
+// the actual bug found live: a generic portal page with 17 chunks
+// mentioning "Fakultäten" pushed a specific faculty's own page (3 matching
+// chunks) out of a 20-result keyword search.
+func TestLocalvecKeywordSearchDiversifiesAcrossDocuments(t *testing.T) {
+	entries := map[string]keywordDBEntry{}
+	for i := 0; i < 10; i++ {
+		entries["flood-"+string(rune('a'+i))] = newKeywordEntry("Fakultäten Übersicht", map[string]any{"url": "https://example.com/portal"})
+	}
+	entries["faculty"] = newKeywordEntry("Fakultäten der Universität", map[string]any{"url": "https://example.com/fakultaet-x"})
+
+	store := writeLocalvecDB(t, entries)
+
+	docs, err := store.KeywordSearch(context.Background(), "Fakultäten", 10, nil, nil)
+	if err != nil {
+		t.Fatalf("KeywordSearch: %v", err)
+	}
+
+	urls := map[string]int{}
+	for _, d := range docs {
+		u, _ := d.Metadata["url"].(string)
+		urls[u]++
+	}
+	if urls["https://example.com/fakultaet-x"] == 0 {
+		t.Errorf("the single-match document was crowded out entirely by the flooding one: %v", urls)
+	}
+	if got := urls["https://example.com/portal"]; got > maxPerDocument {
+		t.Errorf("flooding document contributed %d results, want at most maxPerDocument=%d", got, maxPerDocument)
+	}
+}
+
 func TestLocalvecKeywordSearchMissingDBFileReturnsNil(t *testing.T) {
 	store := &LocalvecStore{dbPath: filepath.Join(t.TempDir(), "does-not-exist.json")}
 	docs, err := store.KeywordSearch(context.Background(), "Haushalt", 10, nil, nil)
