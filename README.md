@@ -39,6 +39,7 @@ mcp.go        — MCPModeRequested, JSONToolHandler, ServeMCPStdio: expose Genki
 embed.go      — NewPrefixEmbedder, QueryDocument: instruction prefixes for asymmetric embedding models
 jobs.go       — JobStore: in-memory async job queue with progress, one background worker
 feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
+safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injection hardening
 conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, ConfidenceLabel
 id.go         — NewRandomHexID
 ```
@@ -172,6 +173,19 @@ Small pieces every QA app ends up needing, none tied to a particular document do
 - **`CondenseFollowUp`** (with `QATurn`, `TrimHistory`, `FormatHistory`, `IsReliableCondense`, `FallbackStandaloneQuestion`) — rewrites a follow-up into a standalone question via an app-supplied prompt taking `{history, question}`, and rejects rewrites that invent or drop numbers present in the conversation. `FormatHistory` labels turns in German ("Nutzer"/"Assistent").
 - **`BestExcerpt`, `ConfidenceLabel`** — a short verbatim quote per citation, and a coarse German "hoch"/"mittel"/"niedrig" label from a reranker's 0–10 top score.
 - **`NewPrefixEmbedder` / `QueryDocument`** — prepend the query/passage instruction prefixes asymmetric embedding models expect (mxbai-embed-large, nomic-embed-text, e5). Models it doesn't know are left unwrapped. Build search-query documents with `QueryDocument`; HyDE text stays a plain document.
+
+### Prompt-injection hardening
+
+A second layer, not a guarantee: a model cannot reliably tell instructions from data, so a hostile sentence in an indexed page or PDF can still sway an answer. The real defense is giving the model nothing worth hijacking (read-only tools, no secrets in the prompt). These helpers narrow the damage:
+
+```go
+func SanitizeUntrusted(text string) string
+func WrapContext(context string) string
+func SanitizeAnswer(answer string, allowedURLs []string) string
+```
+
+- **`WrapContext`** — cleans the assembled context with `SanitizeUntrusted` (drops Unicode tag characters, zero-width and bidi-control characters, other control characters: ways to hide instructions from a human reader), defuses any copy of the delimiter in the text so a document can't close the block early, and wraps it in `<context>…</context>` (`ContextOpenTag`/`ContextCloseTag`). The app's system prompt must say that everything between the tags is quoted material and never instructions.
+- **`SanitizeAnswer`** — applied to a model reply: removes Markdown images (rendered automatically, so a URL with data in it leaks without a click) and raw HTML, and drops any link or bare URL that isn't among `allowedURLs` (the answer's own source URLs; a URL counts if it equals an entry or extends it at a path boundary). It needs the *complete* answer: when streaming, don't render images or follow links until the answer is done, then replace what was shown with the sanitized text. The removed-link marker is German (`[Link entfernt]`).
 
 ### Retrieval quality: HyDE, reranking, RRF fusion
 
