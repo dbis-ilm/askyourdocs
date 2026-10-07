@@ -1,6 +1,6 @@
 # Ask Your Documents
 
-A small, reusable RAG engine for building "ask your documents" apps: parse documents, chunk them for retrieval, index them, and get back a Genkit retriever — without pulling in any particular app's domain (document-specific metadata, auth, admin UI, job queues).
+A small, reusable RAG engine for building "ask your documents" apps: parse documents, chunk them for retrieval, index them, and get back a Genkit retriever — without pulling in any particular app's domain (document-specific metadata, auth, admin UI). It does include the small, domain-neutral building blocks most QA apps need around that core — an async job queue, a feedback log, multi-turn follow-up helpers — see [App building blocks](#app-building-blocks-jobs-feedback-multi-turn-embeddings).
 
 ## Goal
 
@@ -15,7 +15,7 @@ This module has its own `go.mod`. It depends on
 [Genkit](https://genkit.dev) (for `ai.Document`/`ai.Embedder`/`ai.Retriever`
 and the localvec/pgvector store wiring), pgx + pgvector-go, a PDF reader and
 an HTML parser — nothing specific to any one app (no LDAP, no googlegenai/
-grpc, no job queue). Run `go list -m all` in this repo to see that list —
+grpc; the job queue and feedback log here are generic in-memory/JSON-file pieces, not a particular app's). Run `go list -m all` in this repo to see that list —
 unlike when run from a consumer's workspace, there's nothing else to filter
 out.
 
