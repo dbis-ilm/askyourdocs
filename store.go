@@ -33,7 +33,7 @@ import (
 // grouping identity every app needs for a "list what's indexed" admin view,
 // before any app-specific metadata (ask-pdf's tag/datum/rank) is layered on
 // top; an app wanting that layers its own, richer Sources method instead of
-// using LocalvecStore's/PgvecStore's (see cmd/ask-pdf's pgvecStore).
+// using LocalvecStore's/PgvecStore's (see the ask-pdf app's pgvecStore).
 type Source struct {
 	URL    string `json:"url,omitempty"`
 	Source string `json:"source,omitempty"`
@@ -99,7 +99,7 @@ func IndexInBatches(ctx context.Context, store VectorStore, docs []*ai.Document,
 // plugin — a file-based store with no external dependency (no database to
 // run), suitable for a single-node app or a quick demo. Its Retriever field
 // is genkit's own ai.Retriever; an app needing filtered or ranked retrieval
-// builds that on top (see cmd/ask-pdf's pgvecStore, in the app that uses
+// builds that on top (see the ask-pdf app's pgvecStore, in the app that uses
 // this engine, for a richer alternative implementing a larger interface
 // against PostgreSQL instead).
 type LocalvecStore struct {

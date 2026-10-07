@@ -30,7 +30,7 @@ import (
 )
 
 // CrawlInput configures RunCrawl. It carries none of an app's own
-// per-document metadata (e.g. cmd/ask-pdf's tag/datum) — that's attached by
+// per-document metadata (e.g. the ask-pdf app's tag/datum) — that's attached by
 // the IndexPageFunc closure the app passes in, not by the crawl itself.
 type CrawlInput struct {
 	SeedURLs []string

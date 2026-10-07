@@ -36,7 +36,7 @@ import (
 // single file. Pool and Embedder are exported so an app needing more than
 // the plain, unfiltered Retrieve below (e.g. filtered retrieval, keyword
 // search, source administration) can run its own queries against the same
-// connection and embedder — see cmd/ask-pdf's pgvecStore, which embeds this
+// connection and embedder — see the ask-pdf app's pgvecStore, which embeds this
 // type and adds exactly that.
 type PgvecStore struct {
 	Pool      *pgxpool.Pool
@@ -132,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_fts
 	}
 
 	// Trigram index for LIKE '%…%' lookups (e.g. an app's own KeywordSearch).
-	// Without it such lookups are sequential scans; see cmd/ask-pdf's
+	// Without it such lookups are sequential scans; see the ask-pdf app's
 	// KeywordSearch for the measured cost of skipping this.
 	const trgmSQL = `CREATE INDEX IF NOT EXISTS idx_documents_trgm
 	  ON documents USING gin ((lower(content || ' ' || parent_text)) gin_trgm_ops)`
@@ -223,7 +223,7 @@ func (s *PgvecStore) retrieve(ctx context.Context, req *ai.RetrieverRequest) (*a
 
 // Retrieve runs a plain vector similarity search with no filtering — an app
 // needing SQL-side filtering (date ranges, tags, ...) builds that itself
-// against Pool/Embedder instead (see cmd/ask-pdf's filtered Retrieve).
+// against Pool/Embedder instead (see the ask-pdf app's filtered Retrieve).
 func (s *PgvecStore) Retrieve(ctx context.Context, query *ai.Document, k int) ([]*ai.Document, error) {
 	if query == nil {
 		return nil, fmt.Errorf("retrieve: query document is nil")
@@ -256,7 +256,7 @@ LIMIT $2`
 
 // ScanDocs reads content, metadata and parent text rows into documents. It
 // expects exactly those three columns, in that order — the shape every
-// query in this file and in cmd/ask-pdf's pgvecStore selects.
+// query in this file and in the ask-pdf app's pgvecStore selects.
 func ScanDocs(rows pgx.Rows) ([]*ai.Document, error) {
 	var docs []*ai.Document
 	for rows.Next() {
