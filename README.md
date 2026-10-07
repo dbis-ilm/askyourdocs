@@ -36,6 +36,11 @@ search.go     — ExtractKeywords, ExtractQuotedPhrases, LocalvecKeywordSearch, 
 eval.go       — RegisterEvaluators: custom/faithfulness, custom/answerRelevancy
 evalgen.go    — EvalCase[In], GenerateEvalSet: build a genkit eval:flow dataset from a directory of documents
 mcp.go        — MCPModeRequested, JSONToolHandler, ServeMCPStdio: expose Genkit tools over stdio
+embed.go      — NewPrefixEmbedder, QueryDocument: instruction prefixes for asymmetric embedding models
+jobs.go       — JobStore: in-memory async job queue with progress, one background worker
+feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
+conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, ConfidenceLabel
+id.go         — NewRandomHexID
 ```
 
 ### Text extraction & chunking
@@ -157,6 +162,16 @@ func DefineProgressFlow[In, Out any](g *genkit.Genkit, name string, fn func(ctx 
 ```
 
 Every ingest/crawl flow (`indexPDFDocument`, `crawlWeb`, `reindexAllDocuments`, ...) is a Genkit streaming flow only so an HTTP layer can run it as a background job and surface progress messages as it goes — that wrapping (`core.StreamCallback[string]`, calling it as `sendChunk(ctx, msg)`) is identical across every one of them. `DefineProgressFlow` does that wrapping once: write `fn` against a plain `progress func(string)` and get a `*core.Flow[In, Out, string]` back, usable exactly like any other Genkit flow (`.Run` for a synchronous caller that discards the stream, `.Stream` for incremental progress). This is *not* the right shape for a flow that streams its actual output rather than progress-on-the-way-to-a-result — e.g. an answer flow streaming response text — those still call `genkit.DefineStreamingFlow` directly.
+
+### App building blocks: jobs, feedback, multi-turn, embeddings
+
+Small pieces every QA app ends up needing, none tied to a particular document domain:
+
+- **`JobStore`** — runs work one job at a time on a single background worker (so an index and a crawl never compete for the same embedding backend), tracks status/progress/result in memory, and caps its history. `RunStreamingFlowAsJob` drains a flow made with `DefineProgressFlow` into a job's progress and result. Enqueue with the app's long-lived context, not an HTTP request's.
+- **`FeedbackStore[E]`** — appends question/answer entries to a JSON file and rates them later. `E` is the app's own entry type (its own citation shape and extra fields); pass `NewFeedbackStore` functions to read an entry's ID and set its rating. Logging every interaction turns real usage into an eval dataset.
+- **`CondenseFollowUp`** (with `QATurn`, `TrimHistory`, `FormatHistory`, `IsReliableCondense`, `FallbackStandaloneQuestion`) — rewrites a follow-up into a standalone question via an app-supplied prompt taking `{history, question}`, and rejects rewrites that invent or drop numbers present in the conversation. `FormatHistory` labels turns in German ("Nutzer"/"Assistent").
+- **`BestExcerpt`, `ConfidenceLabel`** — a short verbatim quote per citation, and a coarse German "hoch"/"mittel"/"niedrig" label from a reranker's 0–10 top score.
+- **`NewPrefixEmbedder` / `QueryDocument`** — prepend the query/passage instruction prefixes asymmetric embedding models expect (mxbai-embed-large, nomic-embed-text, e5). Models it doesn't know are left unwrapped. Build search-query documents with `QueryDocument`; HyDE text stays a plain document.
 
 ### Retrieval quality: HyDE, reranking, RRF fusion
 
