@@ -1,6 +1,7 @@
 # Ask Your Documents
 
 [![CI](https://github.com/dbis-ilm/askyourdocs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dbis-ilm/askyourdocs/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/dbis-ilm/askyourdocs/branch/main/graph/badge.svg)](https://codecov.io/gh/dbis-ilm/askyourdocs)
 
 A small, reusable RAG engine for building "ask your documents" apps: parse documents, chunk them for retrieval, index them, and get back a Genkit retriever — without pulling in any particular app's domain (document-specific metadata, auth, admin UI). It does include the small, domain-neutral building blocks most QA apps need around that core — an async job queue, a feedback log, multi-turn follow-up helpers — see [App building blocks](#app-building-blocks-jobs-feedback-multi-turn-embeddings).
 
