@@ -296,3 +296,11 @@ func TestConfidenceLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestIsReliableCondenseUnchangedQuestionPasses(t *testing.T) {
+	t.Parallel()
+	hist := []QATurn{{Question: "Wie hoch sind die Gebühren?", Answer: "Circa 300 € pro Semester."}}
+	if !IsReliableCondense("Welche Masterprogramme gibt es?", "Welche Masterprogramme gibt es?", hist) {
+		t.Error("an unchanged standalone question must not be rejected because the history contains numbers")
+	}
+}
