@@ -40,6 +40,8 @@ embed.go      — NewPrefixEmbedder, QueryDocument: instruction prefixes for asy
 jobs.go       — JobStore: in-memory async job queue with progress, one background worker
 feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
 safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injection hardening
+evalhttp.go   — EvalJobHandler, EvalDatasetHandler, RestrictEvalPaths: HTTP contract for remote dataset fetching
+cmd/evalset/  — the evalset command
 injection.go  — DetectInjection, InjectionAttacks/Payloads/EvalCases: detection and eval material
 conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, ConfidenceLabel
 id.go         — NewRandomHexID
@@ -251,6 +253,33 @@ Same split as the retrieval-quality helpers above: the search mechanics are gene
 Both backends run the same three-stage strategy: exact phrase ILIKE for quoted substrings (always wins, bypasses stemming), ILIKE on a truncated prefix of long keywords (bridges inflections a stemmer misses), then full-text/substring scoring for the rest — results merged and deduplicated by document text, capped at `maxResults`.
 
 `LocalvecKeywordSearch` is a free function taking a DB file path rather than only a method on `LocalvecStore`, since an app with its own, pre-existing localvec wrapper (its own `dbPath` field, not this package's `LocalvecStore`) can call it directly too — no embedding required.
+
+### Fetching eval datasets from a running app: `evalset`
+
+`genkit flow:run` needs the app's Genkit reflection server, and an app in Docker writes its datasets inside the container. `cmd/evalset` is a small command that fetches a dataset over the app's normal HTTP port instead:
+
+```bash
+go install github.com/dbis-ilm/askyourdocs/cmd/evalset@latest
+
+export EVALSET_PASSWORD=...        # the app's admin password, if it has one
+evalset -kind injection -url http://localhost:3400 -user admin
+evalset -kind generated -data '{"dir":"pdf-data","sampleRate":8,"maxPerDoc":5}' -out testdata/my-set.json
+evalset -kind feedback  -url http://localhost:3400 -user kai -login   # session-cookie apps (POST /api/login)
+```
+
+Kinds: `generated` (questions generated from the indexed documents), `feedback` (from logged real usage), `injection` (fixed prompt-injection attacks). The dataset is saved to `testdata/<name the app gave it>` unless `-out` says otherwise, and the path is printed on stdout. `EVALSET_URL` and `EVALSET_USER` can replace `-url` and `-user`; the password is read from `EVALSET_PASSWORD` only, to keep it off the command line.
+
+An app takes part by registering three admin routes with the engine's helpers (see `evalhttp.go`):
+
+```go
+mux.HandleFunc("POST /api/eval/generated", admin(engine.EvalJobHandler(jobs, ctx, "evalGenerated",
+    func(ctx context.Context, in generateEvalSetInput) (any, error) { return generateFlow.Run(ctx, in) },
+    func(in *generateEvalSetInput) error { return engine.RestrictEvalPaths(&in.Dir, &in.OutPath) })))
+// ... "feedback", "injection" the same way, with RestrictEvalPaths(nil, &in.OutPath)
+mux.HandleFunc("GET /api/eval/datasets/{name}", admin(engine.EvalDatasetHandler("testdata")))
+```
+
+The routes must sit behind the app's admin check: the first starts LLM work and reads server files, and the `feedback` dataset contains logged user questions. `RestrictEvalPaths` ignores a client-supplied `outPath` (so a client can't make the server write anywhere) and rejects an absolute or `..` `dir`; `EvalDatasetHandler` serves only `eval_dataset_*.json` files.
 
 ### Evaluation
 
