@@ -227,6 +227,13 @@ func IsReliableCondense(original, condensed string, history []QATurn) bool {
 	if condensed == "" {
 		return false
 	}
+	// Returned unchanged: the prompt judged the question standalone (topic
+	// switch, no reference to the history). Nothing was invented or dropped,
+	// and the history-number rule below would wrongly reject it and make the
+	// caller prepend the previous question.
+	if strings.TrimSpace(condensed) == strings.TrimSpace(original) {
+		return true
+	}
 
 	var histText strings.Builder
 	for _, t := range history {
