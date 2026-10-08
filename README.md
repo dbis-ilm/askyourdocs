@@ -157,6 +157,17 @@ func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, 
 
 `RunCrawl` does a breadth-first crawl from `cfg.SeedURLs` (same-host/path-prefix only), strips paragraphs that repeat across pages (boilerplate: nav, footers, repeated cards) before indexing, and — with `SAVE_CRAWL_DATA=1` in the environment — caches each cleaned page as Markdown under `outputDir`. `ReindexCrawlData` replays that cache through `indexPage` without re-fetching anything, for when a chunking fix or a changed chunk size should reach an already-crawled site. Carries no app-specific metadata itself — like `IndexSource`, that's entirely the `IndexPageFunc` closure's job.
 
+#### Fetch safety (SSRF)
+
+A crawler fetches whatever URL it is given from the machine it runs on, so anyone who can start a crawl could otherwise make that machine read services only it can reach (a local model server, a database, an admin page, a cloud metadata endpoint at `169.254.169.254`) and get the content back through the index. `FetchWebPage` therefore:
+
+- **refuses private targets by default** — loopback, RFC 1918, link-local, carrier-grade NAT (`100.64/10`), multicast/reserved ranges and IPv6 forms that embed an IPv4 address (IPv4-mapped, NAT64, 6to4). The check runs on the IP actually about to be connected to, after DNS resolution and for every redirect hop, so a hostname that resolves to a private address, or flips to one between check and connect, is caught as well. The error wraps `ErrPrivateTarget`.
+- follows at most 10 redirects, http/https only;
+- reads at most 10 MiB per page (`SetMaxPageBytes`);
+- ignores `HTTP(S)_PROXY` unless private targets are allowed (a proxy resolves targets itself, so the address check can't apply).
+
+To crawl your own intranet or a local development site, an app opts in once at startup with `SetAllowPrivateTargets(true)` — only when the crawl can't be started by someone you don't trust. This module's own tests serve pages from `127.0.0.1` and enable it in `TestMain`.
+
 ### Long-running flows
 
 Wraps a long-running ingest/crawl operation as a Genkit flow that reports progress as it runs, instead of making every such flow redefine that wrapping itself.

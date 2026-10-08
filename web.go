@@ -22,15 +22,18 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
 
-// FetchWebPage downloads the HTML content of a URL.
+// FetchWebPage downloads the HTML content of a URL. It refuses targets that
+// resolve to private, loopback or link-local addresses (see
+// SetAllowPrivateTargets), follows at most 10 redirects, and reads at most
+// SetMaxPageBytes bytes (10 MiB by default).
 func FetchWebPage(url string) (string, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newFetchClient()
+	defer client.CloseIdleConnections()
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("invalid URL: %w", err)
@@ -47,9 +50,13 @@ func FetchWebPage(url string) (string, error) {
 		return "", fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	limit := maxPageBytes.Load()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
+	}
+	if int64(len(body)) > limit {
+		return "", fmt.Errorf("page %s exceeds %d bytes", url, limit)
 	}
 	log.Printf("URL '%v' processed.\n", url)
 	return string(body), nil
