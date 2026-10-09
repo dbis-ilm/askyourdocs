@@ -19,6 +19,8 @@ package engine
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 // A block element that mixes inline text with a nested block must yield both.
@@ -64,6 +66,78 @@ func TestHTMLMixedBlockSkipsBoilerplate(t *testing.T) {
 	for _, p := range paras {
 		if strings.Contains(p.Text, "Navigationslink") || strings.Contains(p.Text, "Seitenleiste") {
 			t.Errorf("boilerplate leaked into paragraph: %q", p.Text)
+		}
+	}
+}
+
+func allText(paras []Paragraph) string {
+	var sb strings.Builder
+	for _, p := range paras {
+		sb.WriteString(p.Text)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// Portal-style pages (JSF/HISinOne) wrap the whole content in one <form>
+// inside "*_navi_*" wrapper classes. Neither may hide the content.
+func TestHTMLContentInsideFormAndNaviClasses(t *testing.T) {
+	long := strings.Repeat("Bewerbungen sind im Online-Portal möglich. ", 12)
+	doc := `<html><body>
+	<nav><a href="/x">Hauptnavigation</a></nav>
+	<div class="content_navi_off content_max_navi_off"><div id="contentFrame">
+	  <form id="startPage"><h1>Bewerbung</h1><p>` + long + `</p></form>
+	</div></div>
+	<footer>Impressum</footer></body></html>`
+
+	paras, err := HTMLToStructuredText(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("HTMLToStructuredText: %v", err)
+	}
+	got := allText(paras)
+	if !strings.Contains(got, "Online-Portal") || !strings.Contains(got, "Bewerbung") {
+		t.Errorf("content inside form lost: %q", got)
+	}
+	if strings.Contains(got, "Hauptnavigation") || strings.Contains(got, "Impressum") {
+		t.Errorf("boilerplate leaked: %q", got)
+	}
+}
+
+// Small forms (search, login) are still dropped, even next to content.
+func TestHTMLSmallFormsStillSkipped(t *testing.T) {
+	const doc = `<html><body><main>
+	  <p>Inhalt der Seite.</p>
+	  <form action="/search"><p>Suche im Portal</p><input name="q"></form>
+	  <form><select><option>` + `Afghanistan Albanien Algerien Andorra Angola Argentinien Armenien Aserbaidschan Australien Bahamas Bahrain Bangladesch Barbados Belarus Belgien Belize Benin Bhutan Bolivien Bosnien Botswana Brasilien Brunei Bulgarien Burkina Burundi Chile China Costa Dänemark Deutschland Dominica Ecuador` + `</option></select></form>
+	</main></body></html>`
+
+	paras, err := HTMLToStructuredText(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("HTMLToStructuredText: %v", err)
+	}
+	got := allText(paras)
+	if !strings.Contains(got, "Inhalt der Seite") {
+		t.Errorf("content lost: %q", got)
+	}
+	if strings.Contains(got, "Suche im Portal") || strings.Contains(got, "Afghanistan") {
+		t.Errorf("small form leaked: %q", got)
+	}
+}
+
+func TestIsBoilerplateWordBoundaries(t *testing.T) {
+	tests := []struct {
+		class string
+		want  bool
+	}{
+		{"main-nav", true}, {"topNav", true}, {"nav", true}, {"navbar", true},
+		{"ad_slot", true}, {"sidebar-left", true}, {"cookie-banner", true},
+		{"content_navi_off", false}, {"road-map", false}, {"navigator-info", false},
+		{"article", false},
+	}
+	for _, tc := range tests {
+		n := &html.Node{Type: html.ElementNode, Data: "div", Attr: []html.Attribute{{Key: "class", Val: tc.class}}}
+		if got := isBoilerplate(n); got != tc.want {
+			t.Errorf("isBoilerplate(class=%q) = %v, want %v", tc.class, got, tc.want)
 		}
 	}
 }

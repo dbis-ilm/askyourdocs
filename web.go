@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -69,9 +70,14 @@ var skipTags = map[string]bool{
 	"nav":      true,
 	"footer":   true,
 	"aside":    true,
-	"form":     true,
 	"noscript": true,
 }
+
+// minContentFormChars is how much visible text a <form> needs to count as
+// content rather than a search/login widget. Some sites (JSF/HISinOne portals,
+// ASP.NET WebForms) wrap the entire page in one <form>, so skipping every form
+// would drop the page.
+const minContentFormChars = 300
 
 // boilerplatePatterns are substrings in class/id attributes that indicate boilerplate.
 // "header" is intentionally omitted — isSiteHeader() handles <header> elements,
@@ -79,8 +85,78 @@ var skipTags = map[string]bool{
 // often belong to real content areas.
 var boilerplatePatterns = []string{
 	"sidebar", "menu", "cookie", "banner", "popup", "modal",
-	"ad-", "advertisement", "nav", "footer",
+	"advertisement", "footer",
 	"site-header", "page-header", "global-header", "top-header",
+}
+
+// boilerplateTokens are short words that only count as boilerplate when they
+// are a whole word in the class/id ("main-nav", "topNav", "ad_slot") — as a
+// substring they hit unrelated names such as "content_navi_off" or "road-map".
+var boilerplateTokens = map[string]bool{
+	"nav": true, "navbar": true, "navigation": true, "ad": true, "ads": true,
+}
+
+// classTokens splits a class/id value into lowercase words at any
+// non-alphanumeric character and at camelCase boundaries.
+func classTokens(val string) []string {
+	var toks []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			toks = append(toks, strings.ToLower(string(cur)))
+			cur = cur[:0]
+		}
+	}
+	var prev rune
+	for _, r := range val {
+		switch {
+		case !unicode.IsLetter(r) && !unicode.IsDigit(r):
+			flush()
+		case unicode.IsUpper(r) && unicode.IsLower(prev):
+			flush()
+			cur = append(cur, r)
+		default:
+			cur = append(cur, r)
+		}
+		prev = r
+	}
+	flush()
+	return toks
+}
+
+// skipElement reports whether n and its subtree are dropped as boilerplate.
+func skipElement(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+	if n.Data == "form" {
+		return !isContentForm(n) || isBoilerplate(n)
+	}
+	return skipTags[n.Data] || isBoilerplate(n) || isSiteHeader(n)
+}
+
+// isContentForm reports whether a <form> holds enough visible text to be page
+// content. Text of options, scripts and textareas does not count, so a form
+// with a long <select> stays a widget.
+func isContentForm(n *html.Node) bool {
+	total := 0
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "script", "style", "option", "textarea", "noscript":
+				return
+			}
+		}
+		if n.Type == html.TextNode {
+			total += len(strings.TrimSpace(n.Data))
+		}
+		for c := n.FirstChild; c != nil && total < minContentFormChars; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return total >= minContentFormChars
 }
 
 // headingLevel returns the heading level (1-6) for h1-h6 tags, or 0 for non-headings.
@@ -112,6 +188,11 @@ func isBoilerplate(n *html.Node) bool {
 			lower := strings.ToLower(attr.Val)
 			for _, pat := range boilerplatePatterns {
 				if strings.Contains(lower, pat) {
+					return true
+				}
+			}
+			for _, tok := range classTokens(attr.Val) {
+				if boilerplateTokens[tok] {
 					return true
 				}
 			}
@@ -240,7 +321,7 @@ func HTMLToStructuredText(r io.Reader) ([]Paragraph, error) {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			// Skip boilerplate elements
-			if skipTags[n.Data] || isBoilerplate(n) || isSiteHeader(n) {
+			if skipElement(n) {
 				return
 			}
 
@@ -339,8 +420,7 @@ func HTMLToStructuredText(r io.Reader) ([]Paragraph, error) {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			// Boilerplate is dropped here too — walkChildren bypasses walk()
 			// for non-structural containers, so its skip check would not run.
-			if c.Type == html.ElementNode &&
-				(skipTags[c.Data] || isBoilerplate(c) || isSiteHeader(c)) {
+			if skipElement(c) {
 				continue
 			}
 			switch {
@@ -460,7 +540,7 @@ func renderInlineNodes(nodes []*html.Node) string {
 			return
 		}
 		if n.Type == html.ElementNode {
-			if skipTags[n.Data] {
+			if skipTags[n.Data] || (n.Data == "form" && !isContentForm(n)) {
 				return
 			}
 
