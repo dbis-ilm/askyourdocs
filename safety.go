@@ -18,6 +18,7 @@ package engine
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -40,12 +41,6 @@ const (
 	ContextOpenTag  = "<context>"
 	ContextCloseTag = "</context>"
 )
-
-// contextTagRE matches any spelling of the context delimiters inside
-// untrusted text — case-insensitive, with optional whitespace — so a
-// document cannot close the block early and continue as if it were the
-// prompt.
-var contextTagRE = regexp.MustCompile(`(?i)<\s*/?\s*context\s*>`)
 
 // SanitizeUntrusted removes characters that are invisible to a human reader
 // but still seen by a model, a common way to hide instructions inside a
@@ -78,9 +73,26 @@ func SanitizeUntrusted(text string) string {
 // ContextOpenTag/ContextCloseTag. Pass the whole assembled context (source
 // headers and chunk texts) as one string.
 func WrapContext(context string) string {
-	clean := SanitizeUntrusted(context)
-	clean = contextTagRE.ReplaceAllString(clean, "[context-tag removed]")
-	return ContextOpenTag + "\n" + strings.TrimSpace(clean) + "\n" + ContextCloseTag
+	return WrapUntrusted("context", context)
+}
+
+var validTagName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
+
+// WrapUntrusted is WrapContext for any delimiter: it cleans text with
+// SanitizeUntrusted, replaces every copy of <tag> / </tag> inside it (any
+// letter case, optional whitespace) with "[tag-tag removed]", trims it and
+// wraps it in <tag> and </tag> on lines of their own. Use it for other
+// untrusted blocks of a prompt — an incoming e-mail, a user-supplied
+// document — and say in the system prompt that the block is quoted material,
+// never instructions. tag must be a plain name ("mail"); anything else is a
+// programming error and panics.
+func WrapUntrusted(tag, text string) string {
+	if !validTagName.MatchString(tag) {
+		panic("askyourdocs: WrapUntrusted: invalid tag name " + strconv.Quote(tag))
+	}
+	re := regexp.MustCompile(`(?i)<\s*/?\s*` + regexp.QuoteMeta(tag) + `\s*>`)
+	clean := re.ReplaceAllString(SanitizeUntrusted(text), "["+tag+"-tag removed]")
+	return "<" + tag + ">\n" + strings.TrimSpace(clean) + "\n</" + tag + ">"
 }
 
 var (

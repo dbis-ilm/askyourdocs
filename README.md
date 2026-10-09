@@ -199,10 +199,14 @@ A second layer, not a guarantee: a model cannot reliably tell instructions from 
 ```go
 func SanitizeUntrusted(text string) string
 func WrapContext(context string) string
+func WrapUntrusted(tag, text string) string
 func SanitizeAnswer(answer string, allowedURLs []string) string
+func AnswerLeaks(answer string, allowedURLs []string) []string
 ```
 
 - **`WrapContext`** — cleans the assembled context with `SanitizeUntrusted` (drops Unicode tag characters, zero-width and bidi-control characters, other control characters: ways to hide instructions from a human reader), defuses any copy of the delimiter in the text so a document can't close the block early, and wraps it in `<context>…</context>` (`ContextOpenTag`/`ContextCloseTag`). The app's system prompt must say that everything between the tags is quoted material and never instructions.
+- **`WrapUntrusted`** — `WrapContext` for any other delimiter: `WrapUntrusted("mail", body)` cleans the text, defuses copies of `<mail>`/`</mail>` in it and wraps it in those tags. `WrapContext` is `WrapUntrusted("context", …)`. The tag must be a plain name (it panics otherwise).
+- **`AnswerLeaks`** — the check side of `SanitizeAnswer`: returns what in an answer shows an attack succeeded (`canary`, `image`, `html`, `link:<url>`, `url:<url>`), empty if nothing. For eval checks on generated answers.
 - **`SanitizeAnswer`** — applied to a model reply: removes Markdown images (rendered automatically, so a URL with data in it leaks without a click) and raw HTML, and drops any link or bare URL that isn't among `allowedURLs` (the answer's own source URLs; a URL counts if it equals an entry or extends it at a path boundary). It needs the *complete* answer: when streaming, don't render images or follow links until the answer is done, then replace what was shown with the sanitized text. The removed-link marker is German (`[Link entfernt]`).
 
 #### Detection and injection evals
