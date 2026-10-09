@@ -61,6 +61,7 @@ type Chunk struct { Text, ParentText, Pages, Section, Top, Breadcrumb, URL strin
 func SupportedDocumentExt(ext string) bool
 func ExtractParagraphs(path string) ([]Paragraph, error)        // .pdf or .docx
 func FetchWebPage(url string) (string, error)
+func FetchWebPageFollowingRefresh(url string) (page, from string, err error) // follows <meta refresh> stubs, same host
 func HTMLToStructuredText(r io.Reader) ([]Paragraph, error)
 func BuildChunks(paras []Paragraph, maxSize, overlapSize int) []Chunk
 func NormalizeSpaces(s string) string
