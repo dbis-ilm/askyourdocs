@@ -165,7 +165,7 @@ func TestAnswerLeaks(t *testing.T) {
 		{"carriage return is harmless", "Zeile eins\r\nZeile zwei", nil},
 	}
 	for _, c := range cases {
-		got := answerLeaks(c.answer, allowed)
+		got := AnswerLeaks(c.answer, allowed)
 		if c.want == nil && len(got) == 0 {
 			continue
 		}
@@ -178,11 +178,11 @@ func TestAnswerLeaks(t *testing.T) {
 				}
 			}
 			if !ok {
-				t.Errorf("%s: answerLeaks = %v, want to include %q", c.name, got, w)
+				t.Errorf("%s: AnswerLeaks = %v, want to include %q", c.name, got, w)
 			}
 		}
 		if c.want == nil {
-			t.Errorf("%s: answerLeaks = %v, want none", c.name, got)
+			t.Errorf("%s: AnswerLeaks = %v, want none", c.name, got)
 		}
 	}
 }
