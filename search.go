@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -315,7 +315,7 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		}
 		got, err := scanKeywordQuery(ctx, pool, qPhrase, args("%"+phrase+"%"))
 		if err != nil {
-			log.Printf("[KeywordSearchSQL] phrase query error for %q: %v", phrase, err)
+			slog.WarnContext(ctx, "KeywordSearchSQL: phrase query failed", "err", err)
 			continue
 		}
 		merge(got)
@@ -341,7 +341,7 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		}
 		got, err := scanKeywordQuery(ctx, pool, qILIKE, args("%"+stem+"%"))
 		if err != nil {
-			log.Printf("[KeywordSearchSQL] ILIKE query error for %q: %v", stem, err)
+			slog.WarnContext(ctx, "KeywordSearchSQL: ILIKE query failed", "err", err)
 			continue
 		}
 		merge(got)
@@ -369,7 +369,7 @@ LIMIT $2`, language, filterClause, docKey, maxPerDocument)
 		}
 		got, err := scanKeywordQuery(ctx, pool, qFTS, args(kw))
 		if err != nil {
-			log.Printf("[KeywordSearchSQL] FTS query error for %q: %v", kw, err)
+			slog.WarnContext(ctx, "KeywordSearchSQL: FTS query failed", "err", err)
 			continue
 		}
 		merge(got)

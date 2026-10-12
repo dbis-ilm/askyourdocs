@@ -19,7 +19,7 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -410,7 +410,7 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 		visited[page.URL] = true
 		result.PagesVisited++
 
-		log.Printf("[crawl] visiting (%d/%d, depth=%d): %s", result.PagesVisited, maxPages, page.Depth, page.URL)
+		slog.DebugContext(ctx, "crawl: visiting", "page", result.PagesVisited, "max", maxPages, "depth", page.Depth, "url", page.URL)
 		progress(fmt.Sprintf("Seite %d/%d (Tiefe %d): %s", result.PagesVisited, maxPages, page.Depth, page.URL))
 
 		htmlContent, err := FetchWebPage(page.URL)
@@ -454,13 +454,13 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 	// ── Phase 2: Remove cross-page boilerplate ──
 	if len(crawledPages) > 1 {
 		removeBoilerplateParas(crawledPages)
-		log.Printf("[crawl] boilerplate removal done across %d pages", len(crawledPages))
+		slog.DebugContext(ctx, "crawl: boilerplate removed", "pages", len(crawledPages))
 	}
 	progress(fmt.Sprintf("Indexiere %d gecrawlte Seiten...", len(crawledPages)))
 
 	// ── Phase 3: Save and index cleaned content ──
 	saveCrawlData := os.Getenv("SAVE_CRAWL_DATA") == "1"
-	log.Printf("[crawl] SAVE_CRAWL_DATA=%q → saveCrawlData=%v (outputDir=%s)", os.Getenv("SAVE_CRAWL_DATA"), saveCrawlData, outputDir)
+	slog.DebugContext(ctx, "crawl: indexing", "pages", len(crawledPages), "saveCrawlData", saveCrawlData, "outputDir", outputDir)
 	for _, cp := range crawledPages {
 		if saveCrawlData {
 			if err := savePageAsMarkdown(outputDir, cp.filename, cp.url, cp.paras); err != nil {
@@ -531,7 +531,7 @@ func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, 
 		progress(fmt.Sprintf("%d/%d Dateien verarbeitet (%s)", result.FilesProcessed, mdCount, entry.Name()))
 	}
 
-	log.Printf("[ReindexCrawlData] %d files processed, %d pages indexed, %d errors",
-		result.FilesProcessed, result.PagesIndexed, len(result.Errors))
+	slog.InfoContext(ctx, "ReindexCrawlData: done",
+		"files", result.FilesProcessed, "pages", result.PagesIndexed, "errors", len(result.Errors))
 	return result, nil
 }

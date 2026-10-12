@@ -19,7 +19,7 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
@@ -72,9 +72,9 @@ func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunk
 
 	deleted, err = src.DeleteStale(ctx, store)
 	if err != nil {
-		log.Printf("[IndexSource] deleteStale %s: %v", src.Name(), err)
+		slog.WarnContext(ctx, "IndexSource: deleting stale chunks failed", "source", src.Name(), "err", err)
 	} else if deleted > 0 {
-		log.Printf("[IndexSource] deleted %d stale chunks for %s", deleted, src.Name())
+		slog.DebugContext(ctx, "IndexSource: stale chunks deleted", "source", src.Name(), "count", deleted)
 	}
 
 	if err := IndexInBatches(ctx, store, docs, func(done, total int) {
@@ -83,7 +83,7 @@ func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunk
 		}
 	}); err != nil {
 		if _, cleanupErr := src.DeleteStale(ctx, store); cleanupErr != nil {
-			log.Printf("[IndexSource] cleanup after failed index for %s: %v", src.Name(), cleanupErr)
+			slog.ErrorContext(ctx, "IndexSource: cleanup after failed index failed", "source", src.Name(), "err", cleanupErr)
 		}
 		return 0, deleted, err
 	}

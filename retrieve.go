@@ -18,7 +18,7 @@ package engine
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -167,7 +167,7 @@ func RerankScores(ctx context.Context, rerankPrompt ai.Prompt, model ai.Model, c
 		slotOf[i] = idx
 	}
 	if len(unique) < len(texts) {
-		log.Printf("[RerankScores] %d candidates, %d distinct texts", len(texts), len(unique))
+		slog.DebugContext(ctx, "RerankScores: duplicate candidates", "candidates", len(texts), "distinct", len(unique))
 	}
 
 	uniqueScores := make([]int, len(unique))
@@ -204,15 +204,15 @@ func RerankScores(ctx context.Context, rerankPrompt ai.Prompt, model ai.Model, c
 					"chunks":   chunks,
 				})...)
 			if err != nil || resp.Text() == "" {
-				log.Printf("[RerankScores] batch %d-%d failed after %s, keeping retrieval order (err=%v)",
-					start+1, end, time.Since(began).Round(time.Millisecond), err)
+				slog.WarnContext(ctx, "RerankScores: batch failed, keeping retrieval order",
+					"from", start+1, "to", end, "took", time.Since(began).Round(time.Millisecond), "err", err)
 				return
 			}
-			log.Printf("[RerankScores] batch %d-%d took %s", start+1, end, time.Since(began).Round(time.Millisecond))
+			slog.DebugContext(ctx, "RerankScores: batch done", "from", start+1, "to", end, "took", time.Since(began).Round(time.Millisecond))
 			batch, scored := parseRerankScores(resp.Text(), end-start, opts.DefaultScore)
 			if scored < end-start {
-				log.Printf("[RerankScores] batch %d-%d: only %d of %d chunks scored, the rest keep %d",
-					start+1, end, scored, end-start, opts.DefaultScore)
+				slog.WarnContext(ctx, "RerankScores: batch partly unscored",
+					"from", start+1, "to", end, "scored", scored, "chunks", end-start, "defaultScore", opts.DefaultScore)
 			}
 			// Each batch writes its own slice of the shared array, so the
 			// writes never overlap.

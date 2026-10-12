@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/firebase/genkit/go/ai"
@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_fts
 
 	want := fmt.Sprintf("vector(%d)", embeddingDim)
 	if colType != want {
-		log.Printf("[PgvecStore] embedding dim mismatch: have %s, want %s — truncating + migrating", colType, want)
+		slog.WarnContext(ctx, "PgvecStore: embedding dimension mismatch, truncating and migrating", "have", colType, "want", want)
 		for _, stmt := range []string{
 			"DROP INDEX IF EXISTS idx_documents_embedding",
 			"TRUNCATE documents RESTART IDENTITY",
@@ -121,7 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_fts
 				return fmt.Errorf("migrate embedding column (%s): %w", stmt, err)
 			}
 		}
-		log.Println("[PgvecStore] embedding column migrated, all documents cleared")
+		slog.WarnContext(ctx, "PgvecStore: embedding column migrated, all documents cleared")
 	}
 
 	// (Re-)create HNSW index — idempotent.
@@ -140,7 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_fts
 		return fmt.Errorf("create trigram index: %w", err)
 	}
 
-	log.Println("[PgvecStore] schema ensured")
+	slog.DebugContext(ctx, "PgvecStore: schema ensured")
 	return nil
 }
 
@@ -196,7 +196,7 @@ func (s *PgvecStore) Index(ctx context.Context, docs []*ai.Document) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
-	log.Printf("[PgvecStore] indexed %d documents", len(docs))
+	slog.DebugContext(ctx, "PgvecStore: documents indexed", "count", len(docs))
 	return nil
 }
 

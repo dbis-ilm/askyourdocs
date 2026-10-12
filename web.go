@@ -19,7 +19,7 @@ package engine
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"unicode"
@@ -59,7 +59,7 @@ func FetchWebPage(url string) (string, error) {
 	if int64(len(body)) > limit {
 		return "", fmt.Errorf("page %s exceeds %d bytes", url, limit)
 	}
-	log.Printf("URL '%v' processed.\n", url)
+	slog.Debug("page fetched", "url", url)
 	return string(body), nil
 }
 

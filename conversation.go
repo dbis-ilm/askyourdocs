@@ -18,7 +18,7 @@ package engine
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strings"
 	"unicode"
 
@@ -300,15 +300,17 @@ func CondenseFollowUp(ctx context.Context, condensePrompt ai.Prompt, model ai.Mo
 			"question": question,
 		})...)
 	if err != nil || strings.TrimSpace(resp.Text()) == "" {
-		log.Printf("[condense] failed, using %q instead (err=%v)", fallback, err)
+		slog.WarnContext(ctx, "condense: failed, using fallback question", "err", err)
+		slog.DebugContext(ctx, "condense: fallback", "question", fallback)
 		return fallback
 	}
 
 	standalone := strings.TrimSpace(resp.Text())
 	if !IsReliableCondense(question, standalone, hist) {
-		log.Printf("[condense] result %q looks unreliable vs. history — using %q instead", standalone, fallback)
+		slog.InfoContext(ctx, "condense: result looks unreliable against history, using fallback question")
+		slog.DebugContext(ctx, "condense: rejected", "result", standalone, "fallback", fallback)
 		return fallback
 	}
-	log.Printf("[condense] follow-up %q (history=%d turns) -> %q", question, len(hist), standalone)
+	slog.DebugContext(ctx, "condense: follow-up rewritten", "question", question, "turns", len(hist), "result", standalone)
 	return standalone
 }

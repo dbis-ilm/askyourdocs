@@ -41,6 +41,7 @@ evalgen.go    — EvalCase[In], GenerateEvalSet: build a genkit eval:flow datase
 mcp.go        — MCPModeRequested, JSONToolHandler, ServeMCPStdio: expose Genkit tools over stdio
 embed.go      — NewPrefixEmbedder, QueryDocument: instruction prefixes for asymmetric embedding models
 provider.go   — Providers, GenerateConfig: resolve "ollama/…", "gpustack/…", "googleai/…" model specs
+logging.go    — SetupLogging, LogConfigFromEnv: log level, log file, JSON, off
 jobs.go       — JobStore: in-memory async job queue with progress, one background worker
 feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
 safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injection hardening
@@ -217,6 +218,28 @@ modelConfig := engine.GenerateConfig(llmSpec, opts)
 `GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; `max_tokens` and `chat_template_kwargs.enable_thinking` for GPUStack (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
 
 The library reads no environment on its own; `ProviderConfigFromEnv`/`GenerateOptionsFromEnv` are optional helpers for apps that use the conventional variable names. Switching the embedding model (or provider) means re-indexing: vectors from different models don't compare, even at the same dimension.
+
+### Logging
+
+The library logs through `log/slog` with levels; it never configures logging itself. An app calls `SetupLogging` first thing in `main`, before `genkit.Init`:
+
+```go
+closer, err := engine.SetupLogging(engine.LogConfigFromEnv()) // LOG_LEVEL, LOG_FILE, LOG_FORMAT
+if err != nil {
+	log.Fatal(err)
+}
+defer closer.Close()
+```
+
+| Variable | Default | |
+|---|---|---|
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `off` |
+| `LOG_FILE` | stderr | file to append to; not rotated (under Docker log to stderr and let the logging driver rotate, otherwise logrotate with `copytruncate`) |
+| `LOG_FORMAT` | `text` | `text` or `json` |
+
+The handler goes in through Genkit's `core/logger`, so Genkit's own records follow the same level and destination, and dev-mode streaming to the Dev UI keeps working. Anything still written through the standard `log` package (in practice `log.Fatal` on a startup error) is routed through the same handler at error level, so it reaches the log file and survives `LOG_LEVEL=error`; only `off` silences it.
+
+Levels used here: **debug** per-request detail (rerank batch timings, crawled URLs, condensed questions); **info** startup, configuration and finished index/crawl runs; **warn** a degraded result (a failed rerank batch kept in retrieval order, a condense fallback, a failed keyword query); **error** something that failed. Request content — user questions, mail text — is only ever logged at debug, so a deployment at `info` keeps it out of its logs.
 
 ### Prompt-injection hardening
 

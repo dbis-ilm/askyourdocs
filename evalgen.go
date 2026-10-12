@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,7 +100,7 @@ func GenerateEvalSet[In any](ctx context.Context, genk *genkit.Genkit, genOpts [
 		docName := filepath.Base(path)
 		paras, err := readEvalSource(path)
 		if err != nil {
-			log.Printf("[GenerateEvalSet] %s: read failed: %v", docName, err)
+			slog.WarnContext(ctx, "GenerateEvalSet: read failed", "doc", docName, "err", err)
 			continue
 		}
 		chunks := BuildChunks(paras, chunkSize, chunkOverlap)
@@ -117,7 +117,7 @@ func GenerateEvalSet[In any](ctx context.Context, genk *genkit.Genkit, genOpts [
 
 			question, answer, err := generateQAPair(ctx, genk, genOpts, text)
 			if err != nil {
-				log.Printf("[GenerateEvalSet] %s chunk %d: %v", docName, i, err)
+				slog.WarnContext(ctx, "GenerateEvalSet: chunk skipped", "doc", docName, "chunk", i, "err", err)
 				skipped++
 				continue
 			}
@@ -129,7 +129,7 @@ func GenerateEvalSet[In any](ctx context.Context, genk *genkit.Genkit, genOpts [
 			})
 			generated++
 		}
-		log.Printf("[GenerateEvalSet] %s: %d questions generated", docName, generated)
+		slog.InfoContext(ctx, "GenerateEvalSet: questions generated", "doc", docName, "count", generated)
 	}
 
 	data, err := json.MarshalIndent(cases, "", "  ")
