@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/firebase/genkit/go/ai"
@@ -43,14 +44,28 @@ func QueryDocument(text string) *ai.Document {
 	return ai.DocumentFromText(text, map[string]any{embedKindKey: embedKindQuery})
 }
 
+// versionSuffix matches the release suffix Hugging Face model names carry
+// ("nomic-embed-text-v1.5", "mxbai-embed-large-v1", "nomic-embed-text-v2-moe").
+var versionSuffix = regexp.MustCompile(`-v\d+(\.\d+)*(-moe)?$`)
+
 // embedPrefixes returns the (query, passage) instruction prefixes for an
 // embedding model. Models that are symmetric — or whose prefixes we don't
 // know — get empty prefixes and are left unwrapped.
+//
+// The name is matched after normalizing away what differs between serving
+// stacks: Ollama's ":latest" style tag, and the Hugging Face organization and
+// version suffix GPUStack deployments typically keep
+// ("nomic-ai/nomic-embed-text-v1.5"). Without that, a GPUStack embedder would
+// silently lose its prefixes.
 func embedPrefixes(model string) (query, passage string) {
 	name := strings.ToLower(model)
 	if i := strings.IndexByte(name, ':'); i >= 0 {
 		name = name[:i] // strip the ":latest" style tag
 	}
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:] // strip the "nomic-ai/" style organization
+	}
+	name = versionSuffix.ReplaceAllString(name, "")
 	switch name {
 	case "mxbai-embed-large":
 		return "Represent this sentence for searching relevant passages: ", ""

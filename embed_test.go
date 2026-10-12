@@ -79,3 +79,19 @@ func TestPrefixEmbedder(t *testing.T) {
 		t.Error("unknown model should be returned unwrapped")
 	}
 }
+
+func TestEmbedPrefixesNormalizesName(t *testing.T) {
+	for _, tc := range []struct{ model, query string }{
+		{"mxbai-embed-large:latest", "Represent this sentence for searching relevant passages: "},
+		{"mixedbread-ai/mxbai-embed-large-v1", "Represent this sentence for searching relevant passages: "},
+		{"nomic-embed-text-v1.5", "search_query: "},
+		{"nomic-ai/nomic-embed-text-v2-moe", "search_query: "},
+		{"intfloat/multilingual-e5-large", "query: "},
+		{"multilingual-e5-large-instruct", ""}, // different prompt format, not ours to guess
+		{"bge-m3", ""},
+	} {
+		if q, _ := embedPrefixes(tc.model); q != tc.query {
+			t.Errorf("embedPrefixes(%q) query = %q, want %q", tc.model, q, tc.query)
+		}
+	}
+}

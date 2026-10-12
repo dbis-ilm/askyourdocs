@@ -40,6 +40,7 @@ eval.go       — RegisterEvaluators: custom/faithfulness, custom/answerRelevanc
 evalgen.go    — EvalCase[In], GenerateEvalSet: build a genkit eval:flow dataset from a directory of documents
 mcp.go        — MCPModeRequested, JSONToolHandler, ServeMCPStdio: expose Genkit tools over stdio
 embed.go      — NewPrefixEmbedder, QueryDocument: instruction prefixes for asymmetric embedding models
+provider.go   — Providers, GenerateConfig: resolve "ollama/…", "gpustack/…", "googleai/…" model specs
 jobs.go       — JobStore: in-memory async job queue with progress, one background worker
 feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
 safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injection hardening
@@ -191,6 +192,31 @@ Small pieces every QA app ends up needing, none tied to a particular document do
 - **`CondenseFollowUp`** (with `QATurn`, `TrimHistory`, `FormatHistory`, `IsReliableCondense`, `FallbackStandaloneQuestion`) — rewrites a follow-up into a standalone question via an app-supplied prompt taking `{history, question}`, and rejects rewrites that invent or drop numbers present in the conversation. `FormatHistory` labels turns in German ("Nutzer"/"Assistent").
 - **`BestExcerpt`, `ConfidenceLabel`** — a short verbatim quote per citation, and a coarse German "hoch"/"mittel"/"niedrig" label from a reranker's 0–10 top score.
 - **`NewPrefixEmbedder` / `QueryDocument`** — prepend the query/passage instruction prefixes asymmetric embedding models expect (mxbai-embed-large, nomic-embed-text, e5). Models it doesn't know are left unwrapped. Build search-query documents with `QueryDocument`; HyDE text stays a plain document.
+
+### Model providers: Ollama, GPUStack, Google AI
+
+Every app resolves the same kind of settings (`LLM_MODEL`, `RERANK_MODEL`, `EMBEDDING_MODEL`) to Genkit models and an embedder, and builds the same per-request config. `provider.go` does that once. A model spec is `<provider>/<model>`:
+
+- `ollama/gemma4:12b` — local Ollama. A spec without a known prefix is an Ollama name, so a bare `EMBEDDING_MODEL=mxbai-embed-large` keeps working.
+- `gpustack/qwen3-8b` — a model deployed on GPUStack, reached through its OpenAI-compatible API (`<GPUSTACK_URL>/v1`; set `GPUSTACK_API_PATH=/v1-openai` for older GPUStack releases). The name is the one shown in GPUStack's model list.
+- `googleai/gemini-2.5-flash` — Gemini; the key comes from `GEMINI_API_KEY`.
+
+```go
+cfg, err := engine.ProviderConfigFromEnv() // OLLAMA_HOST, GPUSTACK_URL/_API_KEY, LLM_TIMEOUT
+p, err := engine.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
+genk := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
+llm, err := p.Model(genk, llmSpec)
+emb, err := p.Embedder(genk, embeddingSpec, 1024) // already wrapped with NewPrefixEmbedder
+
+opts, err := engine.GenerateOptionsFromEnv() // OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_THINK
+modelConfig := engine.GenerateConfig(llmSpec, opts)
+```
+
+`NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{engine.ProviderOllama, engine.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
+
+`GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; `max_tokens` and `chat_template_kwargs.enable_thinking` for GPUStack (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
+
+The library reads no environment on its own; `ProviderConfigFromEnv`/`GenerateOptionsFromEnv` are optional helpers for apps that use the conventional variable names. Switching the embedding model (or provider) means re-indexing: vectors from different models don't compare, even at the same dimension.
 
 ### Prompt-injection hardening
 
@@ -365,9 +391,8 @@ with this repo checked out at `../askyourdocs` relative to the consuming repo. E
 A near-complete program covering the core usage: define one `IngestSource`
 for whatever you're indexing (a single web page, here), index it into a
 `LocalvecStore`, retrieve for a question, and let an LLM answer from what
-came back. Error handling is real; wiring details that don't change (the
-Ollama plugin setup, matching any other Genkit app) are the only thing
-trimmed.
+came back. Error handling is real; model setup goes through [`Providers`](#model-providers-ollama-gpustack-google-ai),
+so switching to GPUStack is a change of spec string.
 
 ```go
 package main
@@ -380,7 +405,6 @@ import (
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/localvec"
-	"github.com/firebase/genkit/go/plugins/ollama"
 
 	askyourdocs "github.com/dbis-ilm/askyourdocs" // alias: package is "engine", path's last segment isn't
 )
@@ -419,17 +443,21 @@ func (s urlSource) DeleteStale(ctx context.Context, store askyourdocs.VectorStor
 func main() {
 	ctx := context.Background()
 
-	ollamaPlugin := &ollama.Ollama{ServerAddress: "http://localhost:11434"}
-	genk := genkit.Init(ctx, genkit.WithPlugins(ollamaPlugin))
-
-	if ollamaPlugin.DefineModel(genk, ollama.ModelDefinition{Name: "gemma3:12b", Type: "chat"}, nil) == nil {
-		log.Fatal("failed to define model")
+	// "ollama/<name>", "gpustack/<name>" or "googleai/<name>" — see Model providers.
+	const llmSpec, embSpec = "ollama/gemma3:12b", "ollama/mxbai-embed-large"
+	providers, err := askyourdocs.NewProviders(askyourdocs.ProviderConfig{}, nil, llmSpec, embSpec)
+	if err != nil {
+		log.Fatal(err)
 	}
-	llm := ollama.Model(genk, "gemma3:12b")
+	genk := genkit.Init(ctx, genkit.WithPlugins(providers.Plugins()...))
 
-	emb := ollamaPlugin.DefineEmbedder(genk, "mxbai-embed-large", 1024, nil)
-	if emb == nil {
-		log.Fatal("failed to define embedder")
+	llm, err := providers.Model(genk, llmSpec)
+	if err != nil {
+		log.Fatal(err)
+	}
+	emb, err := providers.Embedder(genk, embSpec, 1024)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	store, err := askyourdocs.NewLocalvecStore(genk, "docs", emb, "./data")
