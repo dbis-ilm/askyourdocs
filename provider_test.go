@@ -317,3 +317,18 @@ func TestGenerateOptionsFromEnv(t *testing.T) {
 		t.Error("negative OLLAMA_NUM_CTX should be rejected")
 	}
 }
+
+func TestGPUStackBaseURL(t *testing.T) {
+	for _, tc := range []struct{ url, path, want string }{
+		{"https://gpustack.example", "", "https://gpustack.example/v1"},
+		{"https://gpustack.example/", "", "https://gpustack.example/v1"},
+		{"https://gpustack.example/v1", "", "https://gpustack.example/v1"},
+		{"https://gpustack.example/v1/", "", "https://gpustack.example/v1"},
+		{"https://gpustack.example", "/v1-openai/", "https://gpustack.example/v1-openai"},
+		{"https://gpustack.example/v1-openai", "v1-openai", "https://gpustack.example/v1-openai"},
+	} {
+		if got := gpustackBaseURL(tc.url, tc.path); got != tc.want {
+			t.Errorf("gpustackBaseURL(%q, %q) = %q, want %q", tc.url, tc.path, got, tc.want)
+		}
+	}
+}
