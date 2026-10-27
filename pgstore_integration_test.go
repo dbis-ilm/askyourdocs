@@ -65,6 +65,10 @@ func integrationDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
+		// In CI a missing database must fail the run, not skip silently.
+		if os.Getenv("CI") != "" {
+			t.Fatal("DATABASE_URL not set, but CI is: the Postgres service is missing")
+		}
 		t.Skip("DATABASE_URL not set")
 	}
 	return dsn
