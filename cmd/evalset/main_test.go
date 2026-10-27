@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	engine "github.com/dbis-ilm/askyourdocs"
+	"github.com/dbis-ilm/askyourdocs"
 )
 
 // newTestApp stands up the server side of the contract with the engine's own
@@ -36,11 +36,11 @@ import (
 func newTestApp(t *testing.T, flow func(ctx context.Context, in map[string]any) (any, error)) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
-	jobs := engine.NewJobStore()
+	jobs := askyourdocs.NewJobStore()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/eval/{kind}", func(w http.ResponseWriter, r *http.Request) {
-		engine.EvalJobHandler(jobs, context.Background(), r.PathValue("kind"),
+		askyourdocs.EvalJobHandler(jobs, context.Background(), r.PathValue("kind"),
 			func(ctx context.Context, in map[string]any) (any, error) {
 				res, err := flow(ctx, in)
 				if err == nil {
@@ -57,7 +57,7 @@ func newTestApp(t *testing.T, flow func(ctx context.Context, in map[string]any) 
 		}
 		json.NewEncoder(w).Encode(j)
 	})
-	mux.HandleFunc("GET /api/eval/datasets/{name}", engine.EvalDatasetHandler(dir))
+	mux.HandleFunc("GET /api/eval/datasets/{name}", askyourdocs.EvalDatasetHandler(dir))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pw, ok := r.BasicAuth(); !ok || pw != "s3cret" {

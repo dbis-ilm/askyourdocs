@@ -221,17 +221,17 @@ Every app resolves the same kind of settings (`LLM_MODEL`, `RERANK_MODEL`, `EMBE
 - `googleai/gemini-2.5-flash` — Gemini; the key comes from `GEMINI_API_KEY`.
 
 ```go
-cfg, err := engine.ProviderConfigFromEnv() // OLLAMA_HOST, GPUSTACK_URL/_API_KEY, LLM_TIMEOUT
-p, err := engine.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
+cfg, err := askyourdocs.ProviderConfigFromEnv() // OLLAMA_HOST, GPUSTACK_URL/_API_KEY, LLM_TIMEOUT
+p, err := askyourdocs.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
 genk := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
 llm, err := p.Model(genk, llmSpec)
 emb, err := p.Embedder(genk, embeddingSpec, 1024) // already wrapped with NewPrefixEmbedder
 
-opts, err := engine.GenerateOptionsFromEnv() // OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_THINK
-modelConfig := engine.GenerateConfig(llmSpec, opts)
+opts, err := askyourdocs.GenerateOptionsFromEnv() // OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_THINK
+modelConfig := askyourdocs.GenerateConfig(llmSpec, opts)
 ```
 
-`NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{engine.ProviderOllama, engine.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
+`NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{askyourdocs.ProviderOllama, askyourdocs.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
 
 `GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; `max_tokens` and `chat_template_kwargs.enable_thinking` for GPUStack (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
 
@@ -242,7 +242,7 @@ The library reads no environment on its own; `ProviderConfigFromEnv`/`GenerateOp
 The library logs through `log/slog` with levels; it never configures logging itself. An app calls `SetupLogging` first thing in `main`, before `genkit.Init`:
 
 ```go
-closer, err := engine.SetupLogging(engine.LogConfigFromEnv()) // LOG_LEVEL, LOG_FILE, LOG_FORMAT
+closer, err := askyourdocs.SetupLogging(askyourdocs.LogConfigFromEnv()) // LOG_LEVEL, LOG_FILE, LOG_FORMAT
 if err != nil {
 	log.Fatal(err)
 }
@@ -360,11 +360,11 @@ Kinds: `generated` (questions generated from the indexed documents), `feedback` 
 An app takes part by registering three admin routes with the engine's helpers (see `evalhttp.go`):
 
 ```go
-mux.HandleFunc("POST /api/eval/generated", admin(engine.EvalJobHandler(jobs, ctx, "evalGenerated",
+mux.HandleFunc("POST /api/eval/generated", admin(askyourdocs.EvalJobHandler(jobs, ctx, "evalGenerated",
     func(ctx context.Context, in generateEvalSetInput) (any, error) { return generateFlow.Run(ctx, in) },
-    func(in *generateEvalSetInput) error { return engine.RestrictEvalPaths(&in.Dir, &in.OutPath) })))
+    func(in *generateEvalSetInput) error { return askyourdocs.RestrictEvalPaths(&in.Dir, &in.OutPath) })))
 // ... "feedback", "injection" the same way, with RestrictEvalPaths(nil, &in.OutPath)
-mux.HandleFunc("GET /api/eval/datasets/{name}", admin(engine.EvalDatasetHandler("testdata")))
+mux.HandleFunc("GET /api/eval/datasets/{name}", admin(askyourdocs.EvalDatasetHandler("testdata")))
 ```
 
 The routes must sit behind the app's admin check: the first starts LLM work and reads server files, and the `feedback` dataset contains logged user questions. `RestrictEvalPaths` ignores a client-supplied `outPath` (so a client can't make the server write anywhere) and rejects an absolute or `..` `dir`; `EvalDatasetHandler` serves only `eval_dataset_*.json` files.
@@ -410,10 +410,12 @@ go get github.com/dbis-ilm/askyourdocs@latest
 ```
 
 ```go
-import engine "github.com/dbis-ilm/askyourdocs" // alias: package is "engine", path's last segment isn't
+import "github.com/dbis-ilm/askyourdocs"
 ```
 
-which adds a normal `require` line to the consumer's `go.mod`/`go.sum`. Once a tag exists, pin to it the same way: `go get github.com/dbis-ilm/askyourdocs@v0.1.0`.
+The package used to be named `engine`; an app importing it as `engine "github.com/dbis-ilm/askyourdocs"` keeps working with that alias.
+
+The `go get` adds a normal `require` line to the consumer's `go.mod`/`go.sum`. Once a tag exists, pin to it the same way: `go get github.com/dbis-ilm/askyourdocs@v0.1.0`.
 
 If the repo ends up private rather than public, the consumer additionally needs `go env -w GOPRIVATE=github.com/dbis-ilm/askyourdocs` (skips the public checksum database, which can't see a private repo's contents) and whatever git credentials/SSH config already let it `git clone` the repo — `go get` fetches over the same path.
 
@@ -449,7 +451,7 @@ import (
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/localvec"
 
-	askyourdocs "github.com/dbis-ilm/askyourdocs" // alias: package is "engine", path's last segment isn't
+	"github.com/dbis-ilm/askyourdocs"
 )
 
 // urlSource is the IngestSource for one web page — write one of these per

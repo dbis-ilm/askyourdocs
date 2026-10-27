@@ -16,7 +16,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 // Integration tests for PgvecStore and KeywordSearchSQL against a real
 // PostgreSQL with pgvector. Run with

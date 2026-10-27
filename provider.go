@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 import (
 	"fmt"
@@ -110,7 +110,7 @@ func ProviderConfigFromEnv() (ProviderConfig, error) {
 // Providers sets up the Genkit plugins a set of model specs needs and
 // resolves those specs to models and embedders. Typical use:
 //
-//	p, err := engine.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
+//	p, err := askyourdocs.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
 //	genk := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
 //	llm, err := p.Model(genk, llmSpec)
 //	emb, err := p.Embedder(genk, embeddingSpec, 1024)
