@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -54,9 +55,48 @@ func TestCheckTextSearchLanguage(t *testing.T) {
 func TestNewPgvecStoreRejectsInvalidLanguageBeforeConnecting(t *testing.T) {
 	// The DSN is never used: the language check comes first.
 	_, err := NewPgvecStore(context.Background(), nil, "test", &recordingEmbedder{}, "postgres://unused", 3,
-		WithTextSearchLanguage("x'; --"))
+		WithTextSearchLanguages("german", "x'; --"))
 	if err == nil || !strings.Contains(err.Error(), "text-search configuration") {
 		t.Fatalf("NewPgvecStore error = %v, want invalid text-search configuration", err)
+	}
+}
+
+func TestNormalizeTextSearchLanguages(t *testing.T) {
+	got, err := normalizeTextSearchLanguages([]string{"german", "english", "german", "simple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"german", "english", "simple"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if _, err := normalizeTextSearchLanguages(nil); err == nil {
+		t.Error("no languages: got nil error")
+	}
+	if _, err := normalizeTextSearchLanguages([]string{"german", "Eng"}); err == nil {
+		t.Error("invalid language: got nil error")
+	}
+}
+
+func TestNewPgvecStoreRejectsEmptyLanguages(t *testing.T) {
+	_, err := NewPgvecStore(context.Background(), nil, "test", &recordingEmbedder{}, "postgres://unused", 3,
+		WithTextSearchLanguages())
+	if err == nil || !strings.Contains(err.Error(), "no text-search configuration") {
+		t.Fatalf("NewPgvecStore error = %v, want no text-search configuration", err)
+	}
+}
+
+func TestFTSExpressions(t *testing.T) {
+	langs := []string{"german", "english"}
+	if got, want := tsvectorExpr(langs),
+		`to_tsvector('german', content || ' ' || coalesce(parent_text, '')) || to_tsvector('english', content || ' ' || coalesce(parent_text, ''))`; got != want {
+		t.Errorf("tsvectorExpr = %s\nwant %s", got, want)
+	}
+	if got, want := tsqueryExpr(langs, "$1"),
+		`(websearch_to_tsquery('german', $1) || websearch_to_tsquery('english', $1))`; got != want {
+		t.Errorf("tsqueryExpr = %s\nwant %s", got, want)
+	}
+	if got, want := ftsMarker(langs), "askyourdocs:fts=german,english"; got != want {
+		t.Errorf("ftsMarker = %s, want %s", got, want)
 	}
 }
 

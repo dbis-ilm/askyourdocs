@@ -235,14 +235,16 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 
 // KeywordSearchSQL runs the same keyword/phrase search as
 // LocalvecStore.KeywordSearch against a PostgreSQL table shaped like
-// PgvecStore's documents table (content, metadata, parent_text columns):
+// PgvecStore's documents table (content, metadata, parent_text and the
+// generated tsv column):
 //
 //  1. Exact phrase ILIKE for quoted substrings — always wins, bypasses
 //     stemming entirely, good for technical terms/compound nouns.
 //  2. ILIKE on a truncated prefix of any long (>=8 char) keyword — bridges
 //     inflections the stemmer misses (e.g. a word stemming differently than
 //     its related forms).
-//  3. Full-text search via websearch_to_tsquery, one query per keyword run
+//  3. Full-text search on the tsv column via websearch_to_tsquery, one query
+//     per keyword run
 //     independently — so a high-frequency keyword can't dilute the ranking
 //     of a more specific one sharing the same query.
 //
@@ -251,10 +253,13 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 // chunks can't single-handedly fill the result budget and starve out a
 // document that only matches once or twice. Results from all three stages
 // are then merged and deduplicated by document text, and capped at
-// maxResults overall. language is a Postgres text-search configuration
-// name ("german", "english", "simple", ...) — always a fixed string the
-// caller controls, never user input, so it's safe to interpolate into the
-// query text (bind parameters don't support configuration names). extraWhere
+// maxResults overall. language is the Postgres text-search configuration
+// ("german", "english", "simple", ...) the full-text stage stems the query
+// with — always a fixed string the caller controls, never user input, so
+// it's safe to interpolate into the query text (bind parameters don't
+// support configuration names). It should be one of the store's
+// TextSearchLanguages, or the stemmed query won't match the stored
+// lexemes; PgvecStore.KeywordSearch queries with all of them. extraWhere
 // is ANDed into every query's WHERE clause with extraArgs as its bind
 // values, letting the caller add its own filter (e.g. a date/tag
 // restriction); every query already binds the search term as $1 and the row
@@ -266,12 +271,19 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 // it ran failed (e.g. the database is unreachable), when ctx is done, or
 // when language is not a plain identifier.
 func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, maxResults int, language string, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
+	return keywordSearchSQL(ctx, pool, query, maxResults, []string{language}, stopWords, extraWhere, extraArgs)
+}
+
+// keywordSearchSQL is KeywordSearchSQL with the full-text stage matching
+// the query stemmed with any of languages.
+func keywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, maxResults int, languages []string, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
 	keywords := ExtractKeywords(query, stopWords)
 	phrases := ExtractQuotedPhrases(query)
 	if len(keywords) == 0 && len(phrases) == 0 {
 		return nil, nil
 	}
-	if err := checkTextSearchLanguage(language); err != nil {
+	languages, err := normalizeTextSearchLanguages(languages)
+	if err != nil {
 		return nil, err
 	}
 
@@ -376,21 +388,22 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 	}
 
 	// 3. Full-text search, one query per keyword.
+	tsq := tsqueryExpr(languages, "$1")
 	qFTS := fmt.Sprintf(`
 WITH matches AS (
     SELECT content, metadata, parent_text,
-           ts_rank(to_tsvector('%[1]s', content || ' ' || parent_text), websearch_to_tsquery('%[1]s', $1)) AS rank,
+           ts_rank(tsv, %[1]s) AS rank,
            row_number() OVER (
                PARTITION BY %[3]s
-               ORDER BY ts_rank(to_tsvector('%[1]s', content || ' ' || parent_text), websearch_to_tsquery('%[1]s', $1)) DESC
+               ORDER BY ts_rank(tsv, %[1]s) DESC
            ) AS rn
     FROM documents
-    WHERE to_tsvector('%[1]s', content || ' ' || parent_text) @@ websearch_to_tsquery('%[1]s', $1)%[2]s
+    WHERE tsv @@ %[1]s%[2]s
 )
 SELECT content, metadata, parent_text FROM matches
 WHERE rn <= %[4]d
 ORDER BY rank DESC
-LIMIT $2`, language, filterClause, docKey, maxPerDocument)
+LIMIT $2`, tsq, filterClause, docKey, maxPerDocument)
 	for _, kw := range keywords {
 		if len(docs) >= maxResults {
 			break

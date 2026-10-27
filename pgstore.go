@@ -45,16 +45,16 @@ type PgvecStore struct {
 	Embedder  ai.Embedder
 	Retriever ai.Retriever
 
-	// TextSearchLanguage is the Postgres text-search configuration the
-	// full-text index was built with. Pass it on to KeywordSearchSQL: the
-	// index is only used when the query names the same configuration.
-	TextSearchLanguage string
+	// TextSearchLanguages are the Postgres text-search configurations
+	// the tsv column is built from (see WithTextSearchLanguages).
+	// KeywordSearch queries with all of them.
+	TextSearchLanguages []string
 }
 
-// DefaultTextSearchLanguage is the text-search configuration NewPgvecStore
-// builds its full-text index with unless WithTextSearchLanguage says
-// otherwise.
-const DefaultTextSearchLanguage = "german"
+// DefaultTextSearchLanguages are the text-search configurations
+// NewPgvecStore builds its full-text column from unless
+// WithTextSearchLanguages says otherwise.
+var DefaultTextSearchLanguages = []string{"german"}
 
 // ErrEmbeddingDimMismatch is returned (wrapped) by NewPgvecStore when the
 // documents table already holds vectors of a different dimension and
@@ -65,15 +65,20 @@ var ErrEmbeddingDimMismatch = errors.New("embedding dimension mismatch")
 type PgvecOption func(*pgvecConfig)
 
 type pgvecConfig struct {
-	language    string
+	languages   []string
 	resetOnDims bool
 }
 
-// WithTextSearchLanguage sets the Postgres text-search configuration
-// ("german", "english", "simple", ...) the full-text index is built with.
-// An existing index built with a different configuration is rebuilt.
-func WithTextSearchLanguage(lang string) PgvecOption {
-	return func(c *pgvecConfig) { c.language = lang }
+// WithTextSearchLanguages sets the Postgres text-search configurations
+// ("german", "english", "simple", ...) for full-text search. Every chunk is
+// stemmed with each of them into one tsvector column, so a corpus mixing
+// languages — even within one document — is searchable without knowing
+// any chunk's language. Each extra configuration grows the column and its
+// index by roughly one more tsvector per row. If the stored column was
+// built from a different set, it is rebuilt at startup, which rewrites the
+// whole table.
+func WithTextSearchLanguages(langs ...string) PgvecOption {
+	return func(c *pgvecConfig) { c.languages = langs }
 }
 
 // WithResetOnDimensionMismatch lets NewPgvecStore delete every stored
@@ -97,6 +102,54 @@ func checkTextSearchLanguage(lang string) error {
 	return nil
 }
 
+// normalizeTextSearchLanguages validates langs and drops duplicates,
+// keeping the first occurrence's position.
+func normalizeTextSearchLanguages(langs []string) ([]string, error) {
+	if len(langs) == 0 {
+		return nil, errors.New("no text-search configuration given")
+	}
+	seen := make(map[string]bool, len(langs))
+	var out []string
+	for _, l := range langs {
+		if err := checkTextSearchLanguage(l); err != nil {
+			return nil, err
+		}
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
+	return out, nil
+}
+
+// ftsText is the text the tsv column indexes.
+const ftsText = `content || ' ' || coalesce(parent_text, '')`
+
+// tsvectorExpr returns the tsv column's generation expression: one
+// to_tsvector per configuration, concatenated.
+func tsvectorExpr(langs []string) string {
+	parts := make([]string, len(langs))
+	for i, l := range langs {
+		parts[i] = fmt.Sprintf("to_tsvector('%s', %s)", l, ftsText)
+	}
+	return strings.Join(parts, " || ")
+}
+
+// tsqueryExpr returns a tsquery matching param stemmed with any of langs.
+func tsqueryExpr(langs []string, param string) string {
+	parts := make([]string, len(langs))
+	for i, l := range langs {
+		parts[i] = fmt.Sprintf("websearch_to_tsquery('%s', %s)", l, param)
+	}
+	return "(" + strings.Join(parts, " || ") + ")"
+}
+
+// ftsMarker is stored as the tsv column's comment, recording which
+// configurations it was built from.
+func ftsMarker(langs []string) string {
+	return "askyourdocs:fts=" + strings.Join(langs, ",")
+}
+
 // NewPgvecStore connects to PostgreSQL, ensures the schema exists for
 // embeddingDim-sized vectors, and registers a Genkit retriever named name.
 // If an existing documents table's embedding column has a different
@@ -104,11 +157,12 @@ func checkTextSearchLanguage(lang string) error {
 // with ErrEmbeddingDimMismatch unless the table is empty or
 // WithResetOnDimensionMismatch is given.
 func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int, opts ...PgvecOption) (*PgvecStore, error) {
-	cfg := pgvecConfig{language: DefaultTextSearchLanguage}
+	cfg := pgvecConfig{languages: DefaultTextSearchLanguages}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	if err := checkTextSearchLanguage(cfg.language); err != nil {
+	langs, err := normalizeTextSearchLanguages(cfg.languages)
+	if err != nil {
 		return nil, err
 	}
 
@@ -122,7 +176,7 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 		return nil, fmt.Errorf("pgvector ping: %w", err)
 	}
 
-	s := &PgvecStore{Pool: pool, Embedder: emb, TextSearchLanguage: cfg.language}
+	s := &PgvecStore{Pool: pool, Embedder: emb, TextSearchLanguages: langs}
 
 	if err := s.ensureSchema(ctx, embeddingDim, cfg.resetOnDims); err != nil {
 		pool.Close()
@@ -199,7 +253,7 @@ CREATE TABLE IF NOT EXISTS documents (
 		return fmt.Errorf("create HNSW index: %w", err)
 	}
 
-	if err := s.ensureFTSIndex(ctx); err != nil {
+	if err := s.ensureFTSColumn(ctx); err != nil {
 		return err
 	}
 
@@ -216,34 +270,69 @@ CREATE TABLE IF NOT EXISTS documents (
 	return nil
 }
 
-// ensureFTSIndex creates the full-text index for s.TextSearchLanguage, and
-// rebuilds it if it exists but was built for another configuration — the
-// index is only usable by queries naming the same configuration, so a
-// mismatch would silently turn every KeywordSearchSQL full-text query into
-// a sequential scan.
-func (s *PgvecStore) ensureFTSIndex(ctx context.Context) error {
-	var def string
-	err := s.Pool.QueryRow(ctx,
-		`SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'idx_documents_fts'`,
-	).Scan(&def)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-	case err != nil:
-		return fmt.Errorf("check full-text index: %w", err)
-	case strings.Contains(def, "'"+s.TextSearchLanguage+"'::regconfig"):
-		return nil
-	default:
-		slog.WarnContext(ctx, "PgvecStore: full-text index built for another language, rebuilding", "want", s.TextSearchLanguage)
-		if _, err := s.Pool.Exec(ctx, `DROP INDEX IF EXISTS idx_documents_fts`); err != nil {
-			return fmt.Errorf("drop full-text index: %w", err)
+// ensureFTSColumn makes sure the generated tsv column holds every chunk
+// stemmed with exactly s.TextSearchLanguages, with a GIN index on it. The
+// column's comment records the configurations it was built from; a
+// missing or different one rebuilds column and index. It also drops the
+// older per-configuration expression index idx_documents_fts.
+func (s *PgvecStore) ensureFTSColumn(ctx context.Context) error {
+	want := ftsMarker(s.TextSearchLanguages)
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("full-text column: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Several app instances starting at once must not migrate concurrently.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('askyourdocs.documents.tsv'))`); err != nil {
+		return fmt.Errorf("full-text column: lock: %w", err)
+	}
+
+	var have *string
+	err = tx.QueryRow(ctx, `
+		SELECT col_description(attrelid, attnum) FROM pg_attribute
+		WHERE attrelid = 'documents'::regclass AND attname = 'tsv' AND NOT attisdropped`).Scan(&have)
+	exists := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("full-text column: check: %w", err)
+	}
+
+	var stmts []string
+	if !exists || have == nil || *have != want {
+		if exists {
+			slog.WarnContext(ctx, "PgvecStore: full-text column built for other languages, rebuilding", "want", s.TextSearchLanguages)
+			stmts = append(stmts, `DROP INDEX IF EXISTS idx_documents_tsv`, `ALTER TABLE documents DROP COLUMN tsv`)
+		}
+		stmts = append(stmts,
+			fmt.Sprintf(`ALTER TABLE documents ADD COLUMN tsv tsvector GENERATED ALWAYS AS (%s) STORED`, tsvectorExpr(s.TextSearchLanguages)),
+			// want consists of validated identifiers, commas and a fixed prefix.
+			fmt.Sprintf(`COMMENT ON COLUMN documents.tsv IS '%s'`, want),
+		)
+	}
+	stmts = append(stmts,
+		`DROP INDEX IF EXISTS idx_documents_fts`,
+		`CREATE INDEX IF NOT EXISTS idx_documents_tsv ON documents USING gin (tsv)`,
+	)
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("full-text column (%s): %w", stmt, err)
 		}
 	}
-	ftsSQL := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_documents_fts
-	  ON documents USING gin (to_tsvector('%s', content || ' ' || parent_text))`, s.TextSearchLanguage)
-	if _, err := s.Pool.Exec(ctx, ftsSQL); err != nil {
-		return fmt.Errorf("create full-text index: %w", err)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("full-text column: commit: %w", err)
 	}
 	return nil
+}
+
+// KeywordSearch runs KeywordSearchSQL's keyword/phrase search against this
+// store, with its full-text stage matching the query stemmed with every
+// configuration in TextSearchLanguages. It mirrors
+// LocalvecStore.KeywordSearch, with extraWhere/extraArgs (placeholders from
+// $3) in place of the filter function; an app wrapping the store with its
+// own KeywordSearch shadows it, as with Retrieve.
+func (s *PgvecStore) KeywordSearch(ctx context.Context, query string, maxResults int, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
+	return keywordSearchSQL(ctx, s.Pool, query, maxResults, s.TextSearchLanguages, stopWords, extraWhere, extraArgs)
 }
 
 // Index embeds the documents and inserts them into PostgreSQL in a single

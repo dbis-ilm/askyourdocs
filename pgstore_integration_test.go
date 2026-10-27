@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -128,15 +129,51 @@ func columnType(t *testing.T, pool *pgxpool.Pool) string {
 	return typ
 }
 
-func ftsIndexDef(t *testing.T, pool *pgxpool.Pool) string {
+func tsvMarker(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	var def string
-	err := pool.QueryRow(context.Background(),
-		`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_documents_fts'`).Scan(&def)
+	var m *string
+	err := pool.QueryRow(context.Background(), `
+		SELECT col_description(attrelid, attnum) FROM pg_attribute
+		WHERE attrelid = 'documents'::regclass AND attname = 'tsv' AND NOT attisdropped`).Scan(&m)
 	if err != nil {
-		t.Fatalf("fts index: %v", err)
+		t.Fatalf("tsv column: %v", err)
 	}
-	return def
+	if m == nil {
+		return ""
+	}
+	return *m
+}
+
+func indexExists(t *testing.T, pool *pgxpool.Pool, name string) bool {
+	t.Helper()
+	var ok bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1)`, name).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
+// tsvAttnum identifies the tsv column; a rebuild drops and re-adds it,
+// which gives it a new attribute number.
+func tsvAttnum(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT attnum FROM pg_attribute
+		WHERE attrelid = 'documents'::regclass AND attname = 'tsv' AND NOT attisdropped`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// contentsOf returns the chunk texts of docs, for readable failures.
+func contentsOf(docs []*ai.Document) []string {
+	out := make([]string, len(docs))
+	for i, d := range docs {
+		out[i] = DocText(d)
+	}
+	return out
 }
 
 func mustIndex(t *testing.T, s *PgvecStore, docs ...*ai.Document) {
@@ -155,8 +192,8 @@ func TestIntegrationPgvecIndexRetrieveSearchDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPgvecStore: %v", err)
 	}
-	if s.TextSearchLanguage != DefaultTextSearchLanguage {
-		t.Errorf("TextSearchLanguage = %q, want %q", s.TextSearchLanguage, DefaultTextSearchLanguage)
+	if !reflect.DeepEqual(s.TextSearchLanguages, DefaultTextSearchLanguages) {
+		t.Errorf("TextSearchLanguages = %v, want %v", s.TextSearchLanguages, DefaultTextSearchLanguages)
 	}
 	mustIndex(t, s,
 		ai.DocumentFromText("Die Prüfungsordnung regelt die Bachelorarbeit.", map[string]any{"url": "https://a.example/po"}),
@@ -169,7 +206,7 @@ func TestIntegrationPgvecIndexRetrieveSearchDelete(t *testing.T) {
 		t.Fatalf("Retrieve = %d docs, %v; want 2", len(got), err)
 	}
 
-	docs, err := KeywordSearchSQL(ctx, s.Pool, "Wann öffnet die Mensa?", 10, s.TextSearchLanguage, testStopWords, "", nil)
+	docs, err := s.KeywordSearch(ctx, "Wann öffnet die Mensa?", 10, testStopWords, "", nil)
 	if err != nil {
 		t.Fatalf("KeywordSearchSQL: %v", err)
 	}
@@ -178,13 +215,14 @@ func TestIntegrationPgvecIndexRetrieveSearchDelete(t *testing.T) {
 	}
 
 	// Long keyword: ILIKE stage plus FTS; quoted phrase: phrase stage.
-	docs, err = KeywordSearchSQL(ctx, s.Pool, `"regelt die bachelorarbeit" Prüfungsordnung`, 10, s.TextSearchLanguage, testStopWords, "", nil)
+	docs, err = s.KeywordSearch(ctx, `"regelt die bachelorarbeit" Prüfungsordnung`, 10, testStopWords, "", nil)
 	if err != nil || len(docs) != 2 {
 		t.Fatalf("KeywordSearchSQL = %d docs, %v; want 2", len(docs), err)
 	}
 
 	// extraWhere placeholders start at $3.
-	docs, err = KeywordSearchSQL(ctx, s.Pool, "Prüfungsordnung", 10, s.TextSearchLanguage, testStopWords,
+	// The free function still works on the same table.
+	docs, err = KeywordSearchSQL(ctx, s.Pool, "Prüfungsordnung", 10, "german", testStopWords,
 		`metadata->>'source' = $3`, []any{"anhang.pdf"})
 	if err != nil || len(docs) != 1 || docs[0].Metadata["source"] != "anhang.pdf" {
 		t.Fatalf("filtered KeywordSearchSQL = %v, %v; want only anhang.pdf", docs, err)
@@ -253,43 +291,136 @@ func TestIntegrationPgvecDimensionMismatchMigratesEmptyTable(t *testing.T) {
 	mustIndex(t, s, ai.DocumentFromText("passt jetzt", nil))
 }
 
-func TestIntegrationPgvecRebuildsFTSIndexForNewLanguage(t *testing.T) {
+func TestIntegrationPgvecMixedLanguageCorpus(t *testing.T) {
+	dsn := integrationDSN(t)
+	resetDB(t, dsn)
+	ctx := context.Background()
+
+	s, err := openStore(t, dsn, 3, WithTextSearchLanguages("german", "english"))
+	if err != nil {
+		t.Fatalf("NewPgvecStore: %v", err)
+	}
+	mustIndex(t, s,
+		ai.DocumentFromText("Die Studierenden schreiben ihre Klausuren im Hörsaal.", map[string]any{"url": "https://a.example/de"}),
+		ai.DocumentFromText("The students are running experiments in the laboratory.", map[string]any{"url": "https://a.example/en"}),
+		ai.DocumentFromText("Im Labor laufen experiments mit neuen Geräten.", map[string]any{"url": "https://a.example/mixed"}),
+	)
+
+	for _, tc := range []struct {
+		query string
+		want  []string // urls, any order
+	}{
+		{"Klausur", []string{"https://a.example/de"}},                               // German stemming: Klausuren -> klausur
+		{"run", []string{"https://a.example/en"}},                                   // English stemming: running -> run
+		{"experiment", []string{"https://a.example/en", "https://a.example/mixed"}}, // English word inside a German chunk
+	} {
+		docs, err := s.KeywordSearch(ctx, tc.query, 10, testStopWords, "", nil)
+		if err != nil {
+			t.Fatalf("KeywordSearch(%q): %v", tc.query, err)
+		}
+		got := map[string]bool{}
+		for _, d := range docs {
+			got[d.Metadata["url"].(string)] = true
+		}
+		if len(got) != len(tc.want) {
+			t.Errorf("KeywordSearch(%q) = %q, want urls %v", tc.query, contentsOf(docs), tc.want)
+			continue
+		}
+		for _, u := range tc.want {
+			if !got[u] {
+				t.Errorf("KeywordSearch(%q) = %q, missing %s", tc.query, contentsOf(docs), u)
+			}
+		}
+	}
+
+	// The column holds both languages' lexemes, so even a query stemmed
+	// with German alone finds the English word.
+	docs, err := KeywordSearchSQL(ctx, s.Pool, "experiment", 10, "german", testStopWords, "", nil)
+	if err != nil || len(docs) != 2 {
+		t.Errorf("German-only KeywordSearchSQL(experiment) = %q, %v; want 2", contentsOf(docs), err)
+	}
+}
+
+func TestIntegrationPgvecMigratesLegacyFTSIndex(t *testing.T) {
 	dsn := integrationDSN(t)
 	pool := resetDB(t, dsn)
 	ctx := context.Background()
 
-	if _, err := openStore(t, dsn, 3); err != nil {
+	// The schema an earlier version created: no tsv column, an expression
+	// index for one configuration.
+	for _, stmt := range []string{
+		`CREATE TABLE documents (
+		  id SERIAL PRIMARY KEY, content TEXT NOT NULL, embedding vector(3),
+		  metadata JSONB DEFAULT '{}', parent_text TEXT DEFAULT '', created_at TIMESTAMPTZ DEFAULT NOW())`,
+		`CREATE INDEX idx_documents_fts ON documents USING gin (to_tsvector('german', content || ' ' || parent_text))`,
+		`INSERT INTO documents (content, embedding, metadata) VALUES ('Alte Prüfungsordnung von früher', '[1,2,3]', '{"url":"https://a.example/alt"}')`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("legacy schema: %v", err)
+		}
+	}
+
+	s, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatalf("NewPgvecStore on legacy schema: %v", err)
+	}
+	if indexExists(t, pool, "idx_documents_fts") {
+		t.Error("legacy idx_documents_fts still exists")
+	}
+	if !indexExists(t, pool, "idx_documents_tsv") {
+		t.Error("idx_documents_tsv missing")
+	}
+	if m := tsvMarker(t, pool); m != "askyourdocs:fts=german" {
+		t.Errorf("tsv marker = %q", m)
+	}
+	// The existing row was kept and its tsv computed.
+	docs, err := s.KeywordSearch(ctx, "früher", 10, testStopWords, "", nil)
+	if err != nil || len(docs) != 1 {
+		t.Fatalf("KeywordSearch on migrated row = %q, %v; want 1", contentsOf(docs), err)
+	}
+}
+
+func TestIntegrationPgvecRebuildsFTSColumnForNewLanguages(t *testing.T) {
+	dsn := integrationDSN(t)
+	pool := resetDB(t, dsn)
+	ctx := context.Background()
+
+	s, err := openStore(t, dsn, 3)
+	if err != nil {
 		t.Fatalf("NewPgvecStore: %v", err)
 	}
-	if def := ftsIndexDef(t, pool); !strings.Contains(def, "'german'::regconfig") {
-		t.Fatalf("fts index = %s, want german", def)
+	mustIndex(t, s, ai.DocumentFromText("The students are running experiments.", nil))
+	before := tsvAttnum(t, pool)
+	// German stemming alone doesn't reduce "running" to "run".
+	if docs, err := s.KeywordSearch(ctx, "run", 10, testStopWords, "", nil); err != nil || len(docs) != 0 {
+		t.Fatalf("German-only KeywordSearch(run) = %q, %v; want none", contentsOf(docs), err)
 	}
 
-	s, err := openStore(t, dsn, 3, WithTextSearchLanguage("english"))
+	s, err = openStore(t, dsn, 3, WithTextSearchLanguages("german", "english"))
 	if err != nil {
-		t.Fatalf("NewPgvecStore english: %v", err)
+		t.Fatalf("NewPgvecStore german+english: %v", err)
 	}
-	if def := ftsIndexDef(t, pool); !strings.Contains(def, "'english'::regconfig") {
-		t.Fatalf("fts index = %s, want english", def)
+	if m := tsvMarker(t, pool); m != "askyourdocs:fts=german,english" {
+		t.Fatalf("tsv marker = %q", m)
+	}
+	rebuilt := tsvAttnum(t, pool)
+	if rebuilt == before {
+		t.Error("tsv column not rebuilt for the new language set")
+	}
+	// The row indexed before the change is now found via English stemming.
+	if docs, err := s.KeywordSearch(ctx, "run", 10, testStopWords, "", nil); err != nil || len(docs) != 1 {
+		t.Fatalf("KeywordSearch(run) after rebuild = %q, %v; want 1", contentsOf(docs), err)
 	}
 
-	// Reopening with the same language leaves the index alone.
-	var oid1, oid2 uint32
-	oidQ := `SELECT 'idx_documents_fts'::regclass::oid`
-	if err := pool.QueryRow(ctx, oidQ).Scan(&oid1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := openStore(t, dsn, 3, WithTextSearchLanguage("english")); err != nil {
+	// Same set (duplicates ignored): no rebuild.
+	if _, err := openStore(t, dsn, 3, WithTextSearchLanguages("german", "english", "german")); err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if err := pool.QueryRow(ctx, oidQ).Scan(&oid2); err != nil {
-		t.Fatal(err)
-	}
-	if oid1 != oid2 {
-		t.Errorf("fts index rebuilt on reopen with the same language")
+	if tsvAttnum(t, pool) != rebuilt {
+		t.Error("tsv column rebuilt on reopen with the same languages")
 	}
 
-	// The planner can use the index for KeywordSearchSQL's FTS predicate.
+	// The planner can use the GIN index for the full-text predicate.
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -298,8 +429,7 @@ func TestIntegrationPgvecRebuildsFTSIndexForNewLanguage(t *testing.T) {
 	if _, err := conn.Exec(ctx, `SET enable_seqscan = off`); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := conn.Query(ctx, `EXPLAIN SELECT 1 FROM documents
-		WHERE to_tsvector('`+s.TextSearchLanguage+`', content || ' ' || parent_text) @@ websearch_to_tsquery('`+s.TextSearchLanguage+`', $1)`, "library")
+	rows, err := conn.Query(ctx, `EXPLAIN SELECT 1 FROM documents WHERE tsv @@ `+tsqueryExpr(s.TextSearchLanguages, "$1"), "experiment")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +442,38 @@ func TestIntegrationPgvecRebuildsFTSIndexForNewLanguage(t *testing.T) {
 		plan.WriteString(line + "\n")
 	}
 	rows.Close()
-	if !strings.Contains(plan.String(), "idx_documents_fts") {
-		t.Errorf("FTS query does not use idx_documents_fts:\n%s", plan.String())
+	if !strings.Contains(plan.String(), "idx_documents_tsv") {
+		t.Errorf("full-text query does not use idx_documents_tsv:\n%s", plan.String())
+	}
+}
+
+func TestIntegrationPgvecConcurrentStartupsMigrateOnce(t *testing.T) {
+	dsn := integrationDSN(t)
+	pool := resetDB(t, dsn)
+
+	if _, err := openStore(t, dsn, 3); err != nil {
+		t.Fatalf("NewPgvecStore: %v", err)
+	}
+	// Several instances starting at once with a new language set must not
+	// trip over each other's ALTER TABLE.
+	const n = 6
+	errs := make(chan error, n)
+	for range n {
+		go func() {
+			s, err := NewPgvecStore(context.Background(), genkit.Init(context.Background()), "test/pgvec",
+				dimEmbedder{3}, dsn, 3, WithTextSearchLanguages("german", "english"))
+			if err == nil {
+				s.Close()
+			}
+			errs <- err
+		}()
+	}
+	for range n {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent NewPgvecStore: %v", err)
+		}
+	}
+	if m := tsvMarker(t, pool); m != "askyourdocs:fts=german,english" {
+		t.Errorf("tsv marker = %q", m)
 	}
 }
