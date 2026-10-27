@@ -18,7 +18,6 @@ package askyourdocs
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/firebase/genkit/go/ai"
@@ -47,11 +46,11 @@ type IngestSource interface {
 }
 
 // IndexSource runs the shared extract/chunk/delete-stale/index/cleanup
-// pipeline against any IngestSource. sendChunk, when non-nil, receives
-// incremental progress messages for a streaming flow's HTTP adapter; pass
-// nil when nothing is listening. Returns how many documents were indexed
-// and how many stale ones were deleted beforehand.
-func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunkSize, chunkOverlap int, sendChunk func(string)) (indexed, deleted int, err error) {
+// pipeline against any IngestSource. progress, when non-nil, receives a
+// StageChunked event and then one StageBatchIndexed event per batch; wrap a
+// text callback with ProgressMessages. Returns how many documents were
+// indexed and how many stale ones were deleted beforehand.
+func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunkSize, chunkOverlap int, progress ProgressFunc) (indexed, deleted int, err error) {
 	paras, err := genkit.Run(ctx, "extract", func() ([]Paragraph, error) {
 		return src.Fetch(ctx)
 	})
@@ -66,9 +65,7 @@ func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunk
 	if err != nil {
 		return 0, 0, err
 	}
-	if sendChunk != nil {
-		sendChunk(fmt.Sprintf("%d Chunks erzeugt, indexiere...", len(docs)))
-	}
+	progress.report(Progress{Stage: StageChunked, Total: len(docs)})
 
 	deleted, err = src.DeleteStale(ctx, store)
 	if err != nil {
@@ -78,9 +75,7 @@ func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunk
 	}
 
 	if err := IndexInBatches(ctx, store, docs, func(done, total int) {
-		if sendChunk != nil {
-			sendChunk(fmt.Sprintf("Batch %d/%d indexiert", done, total))
-		}
+		progress.report(Progress{Stage: StageBatchIndexed, Done: done, Total: total})
 	}); err != nil {
 		if _, cleanupErr := src.DeleteStale(ctx, store); cleanupErr != nil {
 			slog.ErrorContext(ctx, "IndexSource: cleanup after failed index failed", "source", src.Name(), "err", cleanupErr)

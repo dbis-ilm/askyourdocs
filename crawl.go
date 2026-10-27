@@ -359,14 +359,11 @@ func removeBoilerplateParas(pages []crawledPage) {
 // without re-fetching the site.
 //
 // Errors on individual pages are collected in CrawlResult.Errors; only
-// fatal errors (no seeds) cause an early return. progress, if non-nil, is
-// called with a human-readable line at each page visit and at the phase
-// transitions — used to report incremental status on a long crawl job; pass
-// nil when nothing is listening.
-func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress func(string)) (CrawlResult, error) {
-	if progress == nil {
-		progress = func(string) {}
-	}
+// fatal errors (no seeds) cause an early return. progress, if non-nil,
+// receives a StageCrawlFetch event per page visit, StageCrawlIndexing once
+// fetching is done, and a StageCrawlPageIndexed event per page indexed;
+// wrap a text callback with ProgressMessages.
+func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc) (CrawlResult, error) {
 	if len(cfg.SeedURLs) == 0 {
 		return CrawlResult{}, fmt.Errorf("no seed URLs provided")
 	}
@@ -415,7 +412,7 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 		result.PagesVisited++
 
 		slog.DebugContext(ctx, "crawl: visiting", "page", result.PagesVisited, "max", maxPages, "depth", page.Depth, "url", page.URL)
-		progress(fmt.Sprintf("Seite %d/%d (Tiefe %d): %s", result.PagesVisited, maxPages, page.Depth, page.URL))
+		progress.report(Progress{Stage: StageCrawlFetch, Done: result.PagesVisited, Total: maxPages, Depth: page.Depth, URL: page.URL})
 
 		htmlContent, err := FetchWebPage(page.URL)
 		if err != nil {
@@ -460,12 +457,12 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 		removeBoilerplateParas(crawledPages)
 		slog.DebugContext(ctx, "crawl: boilerplate removed", "pages", len(crawledPages))
 	}
-	progress(fmt.Sprintf("Indexiere %d gecrawlte Seiten...", len(crawledPages)))
+	progress.report(Progress{Stage: StageCrawlIndexing, Total: len(crawledPages)})
 
 	// ── Phase 3: Save and index cleaned content ──
 	saveCrawlData := os.Getenv("SAVE_CRAWL_DATA") == "1"
 	slog.DebugContext(ctx, "crawl: indexing", "pages", len(crawledPages), "saveCrawlData", saveCrawlData, "outputDir", outputDir)
-	for _, cp := range crawledPages {
+	for i, cp := range crawledPages {
 		if saveCrawlData {
 			if err := savePageAsMarkdown(outputDir, cp.filename, cp.url, cp.paras); err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("save %s: %v", cp.url, err))
@@ -481,7 +478,7 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 			result.PagesIndexed++
 			result.ChunksIndexed += indexed
 		}
-		progress(fmt.Sprintf("%d/%d Seiten indexiert", result.PagesIndexed, len(crawledPages)))
+		progress.report(Progress{Stage: StageCrawlPageIndexed, Done: i + 1, Total: len(crawledPages), URL: cp.url})
 	}
 
 	return result, nil
@@ -490,12 +487,10 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 // ReindexCrawlData replays every cached crawl-data Markdown file in dir
 // (written by RunCrawl when SAVE_CRAWL_DATA=1) through indexPage, without
 // re-fetching anything — lets a chunking fix or changed chunk size/overlap
-// reach already-crawled sites. progress, if non-nil, is called after each
-// file with a human-readable line; pass nil when nothing is listening.
-func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress func(string)) (ReindexResult, error) {
-	if progress == nil {
-		progress = func(string) {}
-	}
+// reach already-crawled sites. progress, if non-nil, receives a
+// StageReindexFile event after each file; wrap a text callback with
+// ProgressMessages.
+func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress ProgressFunc) (ReindexResult, error) {
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -535,7 +530,7 @@ func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, 
 			result.PagesIndexed++
 			result.ChunksIndexed += indexed
 		}
-		progress(fmt.Sprintf("%d/%d Dateien verarbeitet (%s)", result.FilesProcessed, mdCount, entry.Name()))
+		progress.report(Progress{Stage: StageReindexFile, Done: result.FilesProcessed, Total: mdCount, File: entry.Name()})
 	}
 
 	slog.InfoContext(ctx, "ReindexCrawlData: done",

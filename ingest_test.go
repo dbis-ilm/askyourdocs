@@ -67,7 +67,7 @@ func runIndexSource(t *testing.T, store VectorStore, src IngestSource) (ingestRe
 	g := genkit.Init(ctx)
 	flow := genkit.DefineFlow(g, "ingestTest", func(ctx context.Context, _ string) (ingestResult, error) {
 		var res ingestResult
-		n, d, err := IndexSource(ctx, store, src, 200, 20, func(s string) { res.Progress = append(res.Progress, s) })
+		n, d, err := IndexSource(ctx, store, src, 200, 20, ProgressMessages(func(s string) { res.Progress = append(res.Progress, s) }, GermanProgress))
 		res.Indexed, res.Deleted = n, d
 		return res, err
 	})
@@ -155,7 +155,7 @@ func TestReindexCrawlData(t *testing.T) {
 		}
 		got[u] = len(paras)
 		return 4, nil
-	}, func(s string) { lines = append(lines, s) })
+	}, ProgressMessages(func(s string) { lines = append(lines, s) }, GermanProgress))
 	if err != nil {
 		t.Fatalf("ReindexCrawlData: %v", err)
 	}

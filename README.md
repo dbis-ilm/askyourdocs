@@ -95,7 +95,7 @@ type IngestSource interface {
 	Name() string
 }
 
-func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunkSize, chunkOverlap int, sendChunk func(string)) (indexed, deleted int, err error)
+func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunkSize, chunkOverlap int, progress ProgressFunc) (indexed, deleted int, err error)
 ```
 
 `VectorStore` is deliberately the *write* side only — four methods. An app
@@ -175,8 +175,8 @@ type CrawlInput struct { SeedURLs []string; MaxPages, MaxDepth, DelayMs int }
 type CrawlResult struct { PagesVisited, PagesSaved, PagesIndexed int; Errors []string }
 type ReindexResult struct { FilesProcessed, PagesIndexed int; Errors []string }
 
-func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress func(string)) (CrawlResult, error)
-func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress func(string)) (ReindexResult, error)
+func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc) (CrawlResult, error)
+func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress ProgressFunc) (ReindexResult, error)
 ```
 
 `RunCrawl` does a breadth-first crawl from `cfg.SeedURLs` (same-host/path-prefix only), strips paragraphs that repeat across pages (boilerplate: nav, footers, repeated cards) before indexing, and — with `SAVE_CRAWL_DATA=1` in the environment — caches each cleaned page as Markdown under `outputDir`. `ReindexCrawlData` replays that cache through `indexPage` without re-fetching anything, for when a chunking fix or a changed chunk size should reach an already-crawled site. Carries no app-specific metadata itself — like `IndexSource`, that's entirely the `IndexPageFunc` closure's job.
@@ -201,6 +201,19 @@ func DefineProgressFlow[In, Out any](g *genkit.Genkit, name string, fn func(ctx 
 ```
 
 Every ingest/crawl flow (`indexPDFDocument`, `crawlWeb`, `reindexAllDocuments`, ...) is a Genkit streaming flow only so an HTTP layer can run it as a background job and surface progress messages as it goes — that wrapping (`core.StreamCallback[string]`, calling it as `sendChunk(ctx, msg)`) is identical across every one of them. `DefineProgressFlow` does that wrapping once: write `fn` against a plain `progress func(string)` and get a `*core.Flow[In, Out, string]` back, usable exactly like any other Genkit flow (`.Run` for a synchronous caller that discards the stream, `.Stream` for incremental progress). This is *not* the right shape for a flow that streams its actual output rather than progress-on-the-way-to-a-result — e.g. an answer flow streaming response text — those still call `genkit.DefineStreamingFlow` directly.
+
+### Progress events
+
+`IndexSource`, `RunCrawl` and `ReindexCrawlData` report progress as structured `Progress` events (`Stage`, `Done`, `Total`, plus `URL`/`Depth`/`File` where they apply), not as text. Wording a status line for a user, in whatever language, is app-side like all other user-facing text. For the common case of a flow or job that streams text, `ProgressMessages` adapts a `func(string)` with a formatter, and `GermanProgress` words the events as the German lines these functions used to send themselves:
+
+```go
+type Progress struct { Stage ProgressStage; Done, Total, Depth int; URL, File string }
+type ProgressFunc func(Progress)
+func ProgressMessages(send func(string), format func(Progress) string) ProgressFunc
+func GermanProgress(p Progress) string
+```
+
+`CrawlResult`/`ReindexResult` count pages in `PagesIndexed` and the chunks those pages produced in `ChunksIndexed`.
 
 ### App building blocks: jobs, feedback, multi-turn, embeddings
 
@@ -514,8 +527,8 @@ func main() {
 	// Index one page. chunkSize/chunkOverlap are in characters; the last
 	// argument is an optional progress callback.
 	src := urlSource{url: "https://example.com/about"}
-	indexed, deleted, err := askyourdocs.IndexSource(ctx, store, src, 1200, 150, func(msg string) {
-		log.Println(msg)
+	indexed, deleted, err := askyourdocs.IndexSource(ctx, store, src, 1200, 150, func(p askyourdocs.Progress) {
+		log.Printf("%s %d/%d", p.Stage, p.Done, p.Total)
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -587,7 +600,8 @@ has six more methods than `askyourdocs.VectorStore` needs:
 
 ```go
 func (app *appSetup) indexSource(ctx context.Context, src askyourdocs.IngestSource, progress func(string)) (int, int, error) {
-	return askyourdocs.IndexSource(ctx, app.store, src, app.chunkSize, app.chunkOverlap, progress)
+	return askyourdocs.IndexSource(ctx, app.store, src, app.chunkSize, app.chunkOverlap,
+		askyourdocs.ProgressMessages(progress, askyourdocs.GermanProgress))
 }
 ```
 

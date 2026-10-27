@@ -398,7 +398,7 @@ func TestRunCrawlReportsProgress(t *testing.T) {
 		MaxPages: 5,
 		DelayMs:  1,
 	}, t.TempDir(), func(context.Context, string, []Paragraph) (int, error) { return 1, nil },
-		func(msg string) { progressed = append(progressed, msg) })
+		ProgressMessages(func(msg string) { progressed = append(progressed, msg) }, GermanProgress))
 	if err != nil {
 		t.Fatalf("RunCrawl: %v", err)
 	}
