@@ -235,6 +235,14 @@ func likeStem(kw string) string {
 	return kw
 }
 
+// likeEscaper escapes LIKE's wildcards and its escape character, so user
+// text matches literally.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// escapeLike makes s match itself literally inside a LIKE pattern used
+// with ESCAPE '\'.
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
 // scanKeywordQuery runs q against pool and scans its rows with ScanDocs,
 // closing the rows regardless of outcome.
 func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []any) ([]*ai.Document, error) {
@@ -354,7 +362,7 @@ WITH matches AS (
     SELECT content, metadata, parent_text,
            row_number() OVER (PARTITION BY %[1]s ORDER BY id) AS rn
     FROM documents
-    WHERE LOWER(content || ' ' || parent_text) LIKE $1%[2]s
+    WHERE LOWER(content || ' ' || parent_text) LIKE $1 ESCAPE '\'%[2]s
 )
 SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
 LIMIT $2`, docKey, filterClause, maxPerDocument)
@@ -362,7 +370,7 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		if len(docs) >= maxResults {
 			break
 		}
-		got, ok := run("phrase", qPhrase, "%"+phrase+"%")
+		got, ok := run("phrase", qPhrase, "%"+escapeLike(phrase)+"%")
 		if !ok {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -378,7 +386,7 @@ WITH matches AS (
     SELECT content, metadata, parent_text,
            row_number() OVER (PARTITION BY %[1]s ORDER BY id) AS rn
     FROM documents
-    WHERE LOWER(content || ' ' || parent_text) LIKE $1%[2]s
+    WHERE LOWER(content || ' ' || parent_text) LIKE $1 ESCAPE '\'%[2]s
 )
 SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
 LIMIT $2`, docKey, filterClause, maxPerDocument)
@@ -386,7 +394,7 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		if utf8.RuneCountInString(kw) < 8 || len(docs) >= maxResults {
 			continue
 		}
-		got, ok := run("ILIKE", qILIKE, "%"+likeStem(kw)+"%")
+		got, ok := run("ILIKE", qILIKE, "%"+escapeLike(likeStem(kw))+"%")
 		if !ok {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

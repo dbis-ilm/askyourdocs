@@ -271,3 +271,17 @@ func TestLikeStemCutsRunesNotBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestEscapeLike(t *testing.T) {
+	for in, want := range map[string]string{
+		"raum a_1":      `raum a\_1`,
+		"100%":          `100\%`,
+		`c:\temp`:       `c:\\temp`,
+		`50%_\`:         `50\%\_\\`,
+		"keine zeichen": "keine zeichen",
+	} {
+		if got := escapeLike(in); got != want {
+			t.Errorf("escapeLike(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

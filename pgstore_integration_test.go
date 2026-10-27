@@ -477,3 +477,49 @@ func TestIntegrationPgvecConcurrentStartupsMigrateOnce(t *testing.T) {
 		t.Errorf("tsv marker = %q", m)
 	}
 }
+
+func TestIntegrationKeywordSearchMatchesLikeWildcardsLiterally(t *testing.T) {
+	dsn := integrationDSN(t)
+	resetDB(t, dsn)
+	ctx := context.Background()
+
+	s, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatalf("NewPgvecStore: %v", err)
+	}
+	mustIndex(t, s,
+		ai.DocumentFromText("Treffpunkt Raum A_1 im Erdgeschoss.", map[string]any{"url": "https://a.example/underscore"}),
+		ai.DocumentFromText("Treffpunkt Raum AB1 im Erdgeschoss.", map[string]any{"url": "https://a.example/letter"}),
+		ai.DocumentFromText("Förderung zu 100% übernommen.", map[string]any{"url": "https://a.example/percent"}),
+		ai.DocumentFromText("Förderung zu 1000 Euro übernommen.", map[string]any{"url": "https://a.example/digits"}),
+		ai.DocumentFromText("Die Fahrzeugübergrößen sind genehmigungspflichtig.", map[string]any{"url": "https://a.example/umlaut"}),
+	)
+
+	for _, tc := range []struct{ query, want string }{
+		{`"a_1"`, "https://a.example/underscore"},  // _ would match the B; "a", "1" are too short to be keywords
+		{`"zu 100%"`, "https://a.example/percent"}, // % would match "1000 Euro"
+		// The long keyword's ILIKE stem must stay valid UTF-8 (a byte cut
+		// split the ß, and Postgres rejected the pattern).
+		{"Fahrzeugübergröße", "https://a.example/umlaut"},
+	} {
+		docs, err := s.KeywordSearch(ctx, tc.query, 10, testStopWords, "", nil)
+		if err != nil {
+			t.Fatalf("KeywordSearch(%s): %v", tc.query, err)
+		}
+		if len(docs) != 1 || docs[0].Metadata["url"] != tc.want {
+			t.Errorf("KeywordSearch(%s) = %q, want only %s", tc.query, contentsOf(docs), tc.want)
+		}
+	}
+
+	// The ILIKE stage on its own, so FTS can't hide a failing pattern.
+	rows, err := s.Pool.Query(ctx, `SELECT count(*) FROM documents WHERE LOWER(content || ' ' || parent_text) LIKE $1 ESCAPE '\'`,
+		"%"+escapeLike(likeStem("fahrzeugübergröße"))+"%")
+	if err != nil {
+		t.Fatalf("ILIKE stage query: %v", err)
+	}
+	defer rows.Close()
+	var n int
+	if !rows.Next() || rows.Scan(&n) != nil || n != 1 {
+		t.Fatalf("ILIKE stage matched %d rows (err %v), want 1", n, rows.Err())
+	}
+}
