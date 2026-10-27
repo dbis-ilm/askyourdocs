@@ -154,13 +154,13 @@ func TestReindexCrawlData(t *testing.T) {
 			return 0, errors.New("index failed")
 		}
 		got[u] = len(paras)
-		return 1, nil
+		return 4, nil
 	}, func(s string) { lines = append(lines, s) })
 	if err != nil {
 		t.Fatalf("ReindexCrawlData: %v", err)
 	}
-	if res.FilesProcessed != 3 || res.PagesIndexed != 1 || len(res.Errors) != 2 {
-		t.Errorf("result = %+v, want 3 files, 1 page, 2 errors", res)
+	if res.FilesProcessed != 3 || res.PagesIndexed != 1 || res.ChunksIndexed != 4 || len(res.Errors) != 2 {
+		t.Errorf("result = %+v, want 3 files, 1 page, 4 chunks, 2 errors", res)
 	}
 	if got["https://a.example/"] != 2 {
 		t.Errorf("a.example paras = %d, want 2", got["https://a.example/"])

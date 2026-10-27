@@ -41,17 +41,21 @@ type CrawlInput struct {
 
 // CrawlResult summarises one crawl run.
 type CrawlResult struct {
-	PagesVisited int      `json:"pagesVisited"`
-	PagesSaved   int      `json:"pagesSaved"`
-	PagesIndexed int      `json:"pagesIndexed"`
-	Errors       []string `json:"errors,omitempty"`
+	PagesVisited int `json:"pagesVisited"`
+	PagesSaved   int `json:"pagesSaved"`
+	PagesIndexed int `json:"pagesIndexed"`
+	// ChunksIndexed sums what indexPage returned across all pages.
+	ChunksIndexed int      `json:"chunksIndexed"`
+	Errors        []string `json:"errors,omitempty"`
 }
 
 // ReindexResult summarises one run of ReindexCrawlData.
 type ReindexResult struct {
-	FilesProcessed int      `json:"filesProcessed"`
-	PagesIndexed   int      `json:"pagesIndexed"`
-	Errors         []string `json:"errors,omitempty"`
+	FilesProcessed int `json:"filesProcessed"`
+	PagesIndexed   int `json:"pagesIndexed"`
+	// ChunksIndexed sums what indexPage returned across all files.
+	ChunksIndexed int      `json:"chunksIndexed"`
+	Errors        []string `json:"errors,omitempty"`
 }
 
 // IndexPageFunc is the callback RunCrawl and ReindexCrawlData use to index
@@ -474,7 +478,8 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("index %s: %v", cp.url, err))
 		} else {
-			result.PagesIndexed += indexed
+			result.PagesIndexed++
+			result.ChunksIndexed += indexed
 		}
 		progress(fmt.Sprintf("%d/%d Seiten indexiert", result.PagesIndexed, len(crawledPages)))
 	}
@@ -523,10 +528,12 @@ func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, 
 			continue
 		}
 
-		if _, err := indexPage(ctx, pageURL, paras); err != nil {
+		indexed, err := indexPage(ctx, pageURL, paras)
+		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("index %s: %v", entry.Name(), err))
 		} else {
 			result.PagesIndexed++
+			result.ChunksIndexed += indexed
 		}
 		progress(fmt.Sprintf("%d/%d Dateien verarbeitet (%s)", result.FilesProcessed, mdCount, entry.Name()))
 	}
