@@ -547,6 +547,12 @@ func TestIntegrationPgvecIndexBatchIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPgvecStore: %v", err)
 	}
+	for _, idx := range []string{"idx_documents_url", "idx_documents_source", "idx_documents_trgm", "idx_documents_tsv", "idx_documents_embedding"} {
+		if !indexExists(t, pool, idx) {
+			t.Errorf("index %s missing", idx)
+		}
+	}
+
 	docs := make([]*ai.Document, 250)
 	for i := range docs {
 		docs[i] = ai.DocumentFromText(fmt.Sprintf("Abschnitt %d", i), map[string]any{"source": "gross.pdf", "parentText": "Kapitel"})

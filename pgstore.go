@@ -257,6 +257,18 @@ CREATE TABLE IF NOT EXISTS documents (
 		return err
 	}
 
+	// Expression indexes for the per-document lookups: DeleteByURL,
+	// DeleteBySource, and an app's own source administration, which would
+	// otherwise scan the whole table.
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_documents_url ON documents ((metadata->>'url'))`,
+		`CREATE INDEX IF NOT EXISTS idx_documents_source ON documents ((metadata->>'source'))`,
+	} {
+		if _, err := s.Pool.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("create metadata index: %w", err)
+		}
+	}
+
 	// Trigram index for LIKE '%…%' lookups (e.g. an app's own KeywordSearch).
 	// Without it such lookups are sequential scans; see the ask-pdf app's
 	// KeywordSearch for the measured cost of skipping this.
