@@ -70,8 +70,8 @@ func integrationDSN(t *testing.T) string {
 	return dsn
 }
 
-// resetDB drops the documents table so each test starts from scratch, and
-// returns a pool for direct checks.
+// resetDB drops the documents table so each test starts from scratch (and
+// again when it ends), and returns a pool for direct checks.
 func resetDB(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
@@ -94,6 +94,15 @@ func resetDB(t *testing.T, dsn string) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS documents`); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
+	// Leave no table behind: an app's own integration tests on the same
+	// database would otherwise find these tests' 3-dimensional vectors and
+	// be refused with ErrEmbeddingDimMismatch. Registered after pool.Close,
+	// so it runs before it.
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `DROP TABLE IF EXISTS documents`); err != nil {
+			t.Errorf("cleanup: drop table: %v", err)
+		}
+	})
 	return pool
 }
 
