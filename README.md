@@ -48,7 +48,7 @@ safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injecti
 evalhttp.go   — EvalJobHandler, EvalDatasetHandler, RestrictEvalPaths: HTTP contract for remote dataset fetching
 cmd/evalset/  — the evalset command
 injection.go  — DetectInjection, InjectionAttacks/Payloads/EvalCases: detection and eval material
-conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, ConfidenceLabel
+conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, RateConfidence
 id.go         — NewRandomHexID
 ```
 
@@ -222,7 +222,7 @@ Small pieces every QA app ends up needing, none tied to a particular document do
 - **`JobStore`** — runs work one job at a time on a single background worker (so an index and a crawl never compete for the same embedding backend), tracks status/progress/result in memory, and caps its history. `RunStreamingFlowAsJob` drains a flow made with `DefineProgressFlow` into a job's progress and result. Enqueue with the app's long-lived context, not an HTTP request's.
 - **`FeedbackStore[E]`** — appends question/answer entries to a JSON file and rates them later. `E` is the app's own entry type (its own citation shape and extra fields); pass `NewFeedbackStore` functions to read an entry's ID and set its rating. Logging every interaction turns real usage into an eval dataset.
 - **`CondenseFollowUp`** (with `QATurn`, `TrimHistory`, `FormatHistory`, `IsReliableCondense`, `FallbackStandaloneQuestion`) — rewrites a follow-up into a standalone question via an app-supplied prompt taking `{history, question}`, and rejects rewrites that invent or drop numbers present in the conversation. `FormatHistory` labels turns in German ("Nutzer"/"Assistent").
-- **`BestExcerpt`, `ConfidenceLabel`** — a short verbatim quote per citation, and a coarse German "hoch"/"mittel"/"niedrig" label from a reranker's 0–10 top score.
+- **`BestExcerpt`, `RateConfidence`** — a short verbatim quote per citation, and a coarse `high`/`medium`/`low` `Confidence` (`GermanConfidence` words it as "hoch"/"mittel"/"niedrig"; the deprecated `ConfidenceLabel` does both in one call) from a reranker's 0–10 top score.
 - **`NewPrefixEmbedder` / `QueryDocument`** — prepend the query/passage instruction prefixes asymmetric embedding models expect (mxbai-embed-large, nomic-embed-text, e5). Models it doesn't know are left unwrapped. Build search-query documents with `QueryDocument`; HyDE text stays a plain document.
 
 ### Model providers: Ollama, GPUStack, Google AI

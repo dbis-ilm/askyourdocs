@@ -92,25 +92,58 @@ func hasAny(a, b map[string]bool) bool {
 	return false
 }
 
-// ConfidenceLabel derives a coarse "hoch"/"mittel"/"niedrig" label from
-// topScore — the reranker's 0-10 relevance score (see the app's rerank prompt) for the
-// highest-scoring source actually used to answer — and usedFallback, which is
-// true when the reranker scored every candidate below minScore and the top-3
-// fallback kicked in. A fallback answer is never "hoch" even if a stale
-// neutral default score (a neutral default score) happens to be mid-range: it
-// means the reranker found nothing it considered actually relevant, so the
-// answer rests on the least-bad options rather than a confident match.
-func ConfidenceLabel(topScore int, usedFallback bool) string {
+// Confidence is a coarse, language-neutral rating of how well the sources
+// used for an answer matched the question; see RateConfidence.
+type Confidence string
+
+const (
+	ConfidenceHigh   Confidence = "high"
+	ConfidenceMedium Confidence = "medium"
+	ConfidenceLow    Confidence = "low"
+)
+
+// RateConfidence derives a Confidence from topScore — the reranker's 0-10
+// relevance score (see the app's rerank prompt) for the highest-scoring
+// source actually used to answer — and usedFallback, which is true when the
+// reranker scored every candidate below minScore and the top-3 fallback
+// kicked in. A fallback answer is never ConfidenceHigh even if a stale
+// neutral default score happens to be mid-range: it means the reranker
+// found nothing it considered actually relevant, so the answer rests on the
+// least-bad options rather than a confident match.
+func RateConfidence(topScore int, usedFallback bool) Confidence {
 	switch {
 	case usedFallback:
-		return "niedrig"
+		return ConfidenceLow
 	case topScore >= 8:
-		return "hoch"
+		return ConfidenceHigh
 	case topScore >= 5:
-		return "mittel"
+		return ConfidenceMedium
 	default:
+		return ConfidenceLow
+	}
+}
+
+// GermanConfidence words c as "hoch", "mittel" or "niedrig" — the labels
+// ConfidenceLabel has always returned and the apps store and key on. An
+// unknown value gives "".
+func GermanConfidence(c Confidence) string {
+	switch c {
+	case ConfidenceHigh:
+		return "hoch"
+	case ConfidenceMedium:
+		return "mittel"
+	case ConfidenceLow:
 		return "niedrig"
 	}
+	return ""
+}
+
+// ConfidenceLabel is GermanConfidence(RateConfidence(topScore, usedFallback)).
+//
+// Deprecated: Use RateConfidence and word the result in the app, or with
+// GermanConfidence to keep the German labels.
+func ConfidenceLabel(topScore int, usedFallback bool) string {
+	return GermanConfidence(RateConfidence(topScore, usedFallback))
 }
 
 // splitIntoSentences splits text at every newline — both "\n\n" (paragraph
