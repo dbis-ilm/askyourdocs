@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,7 +72,7 @@ func ExtractKeywords(text string, stopWords map[string]bool) []string {
 	seen := make(map[string]bool)
 	var keywords []string
 	for _, w := range words {
-		if len(w) < 3 || stopWords[w] || seen[w] {
+		if utf8.RuneCountInString(w) < 3 || stopWords[w] || seen[w] {
 			continue
 		}
 		seen[w] = true
@@ -222,6 +223,18 @@ func capPerDocument[T any](items []T, maxPer int, key func(T) string) []T {
 	return kept
 }
 
+// likeStem shortens a long keyword by its last two characters (runes, not
+// bytes, so an umlaut is never cut in half) to bridge inflected forms the
+// stemmer misses, e.g. "prüfungsordnungen" also matching "prüfungsordnung".
+// Keywords of up to 10 characters are used as they are.
+func likeStem(kw string) string {
+	r := []rune(kw)
+	if len(r) > 10 {
+		return string(r[:len(r)-2])
+	}
+	return kw
+}
+
 // scanKeywordQuery runs q against pool and scans its rows with ScanDocs,
 // closing the rows regardless of outcome.
 func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []any) ([]*ai.Document, error) {
@@ -370,14 +383,10 @@ WITH matches AS (
 SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
 LIMIT $2`, docKey, filterClause, maxPerDocument)
 	for _, kw := range keywords {
-		if len(kw) < 8 || len(docs) >= maxResults {
+		if utf8.RuneCountInString(kw) < 8 || len(docs) >= maxResults {
 			continue
 		}
-		stem := kw
-		if len(stem) > 10 {
-			stem = stem[:len(stem)-2]
-		}
-		got, ok := run("ILIKE", qILIKE, "%"+stem+"%")
+		got, ok := run("ILIKE", qILIKE, "%"+likeStem(kw)+"%")
 		if !ok {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
