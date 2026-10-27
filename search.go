@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -259,11 +260,19 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 // restriction); every query already binds the search term as $1 and the row
 // limit as $2, so extraWhere's placeholders start at $3. Pass "", nil for no
 // filter.
+//
+// A failing query is logged and skipped, so one bad stage doesn't lose the
+// others' results. KeywordSearchSQL only returns an error when every query
+// it ran failed (e.g. the database is unreachable), when ctx is done, or
+// when language is not a plain identifier.
 func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, maxResults int, language string, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
 	keywords := ExtractKeywords(query, stopWords)
 	phrases := ExtractQuotedPhrases(query)
 	if len(keywords) == 0 && len(phrases) == 0 {
 		return nil, nil
+	}
+	if err := checkTextSearchLanguage(language); err != nil {
+		return nil, err
 	}
 
 	filterClause := ""
@@ -272,6 +281,21 @@ func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, max
 	}
 	args := func(term any) []any {
 		return append([]any{term, maxResults}, extraArgs...)
+	}
+
+	// run executes one stage query, logging and counting failures so the
+	// search can still report an error when nothing succeeded at all.
+	var ran int
+	var errs []error
+	run := func(stage, q string, term any) ([]*ai.Document, bool) {
+		ran++
+		got, err := scanKeywordQuery(ctx, pool, q, args(term))
+		if err != nil {
+			slog.WarnContext(ctx, "KeywordSearchSQL: query failed", "stage", stage, "err", err)
+			errs = append(errs, fmt.Errorf("%s query: %w", stage, err))
+			return nil, false
+		}
+		return got, true
 	}
 
 	seen := make(map[string]bool)
@@ -313,9 +337,11 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		if len(docs) >= maxResults {
 			break
 		}
-		got, err := scanKeywordQuery(ctx, pool, qPhrase, args("%"+phrase+"%"))
-		if err != nil {
-			slog.WarnContext(ctx, "KeywordSearchSQL: phrase query failed", "err", err)
+		got, ok := run("phrase", qPhrase, "%"+phrase+"%")
+		if !ok {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		merge(got)
@@ -339,9 +365,11 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		if len(stem) > 10 {
 			stem = stem[:len(stem)-2]
 		}
-		got, err := scanKeywordQuery(ctx, pool, qILIKE, args("%"+stem+"%"))
-		if err != nil {
-			slog.WarnContext(ctx, "KeywordSearchSQL: ILIKE query failed", "err", err)
+		got, ok := run("ILIKE", qILIKE, "%"+stem+"%")
+		if !ok {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		merge(got)
@@ -367,12 +395,18 @@ LIMIT $2`, language, filterClause, docKey, maxPerDocument)
 		if len(docs) >= maxResults {
 			break
 		}
-		got, err := scanKeywordQuery(ctx, pool, qFTS, args(kw))
-		if err != nil {
-			slog.WarnContext(ctx, "KeywordSearchSQL: FTS query failed", "err", err)
+		got, ok := run("fts", qFTS, kw)
+		if !ok {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		merge(got)
+	}
+
+	if ran > 0 && len(errs) == ran {
+		return nil, fmt.Errorf("keyword search: all %d queries failed: %w", ran, errors.Join(errs...))
 	}
 
 	if len(docs) > maxResults {
