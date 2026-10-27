@@ -119,15 +119,29 @@ hand-roll either:
 
 ```go
 func NewLocalvecStore(g *genkit.Genkit, name string, emb ai.Embedder, dir string) (*LocalvecStore, error)
-func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int) (*PgvecStore, error)
+func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int, opts ...PgvecOption) (*PgvecStore, error)
 ```
 
 `LocalvecStore` wraps Genkit's `localvec` plugin — a file-based store, no
 database to run, good for a single-node app or a demo. `PgvecStore` wraps
-PostgreSQL + pgvector, with schema creation and automatic migration if the
-embedding dimension changes. Both expose a `Retriever ai.Retriever` field
+PostgreSQL + pgvector, with schema creation. Both expose a `Retriever ai.Retriever` field
 (`PgvecStore` additionally exposes `Pool` and `Embedder`) for callers that
 want to retrieve directly rather than through `IndexSource`'s write path.
+
+`PgvecStore` takes two options:
+
+- `WithTextSearchLanguage(lang)` — the Postgres text-search configuration
+  the full-text index is built with (default `"german"`), stored in the
+  `TextSearchLanguage` field. Pass that field on to `KeywordSearchSQL`: the
+  index only serves queries naming the same configuration, and a mismatch
+  silently turns full-text search into a sequential scan. An existing index
+  built for another configuration is rebuilt at startup.
+- `WithResetOnDimensionMismatch()` — when the stored vectors have a
+  different dimension than `embeddingDim` (e.g. after switching embedding
+  models), delete every stored document and migrate the column. Without it,
+  `NewPgvecStore` fails with `ErrEmbeddingDimMismatch` instead, so a wrong
+  dimension in a config can't wipe the index. An empty table is always
+  migrated.
 
 `PgvecStore.Retrieve` does a plain, unfiltered similarity search. An app
 wanting SQL-side filtering (date ranges, tags, ...) runs its own query
@@ -552,7 +566,7 @@ func (s *myStore) Retrieve(ctx context.Context, query *ai.Document, k int, filte
 }
 
 func (s *myStore) KeywordSearch(ctx context.Context, query string, maxResults int, filter myFilter) ([]*ai.Document, error) {
-	// ... askyourdocs.KeywordSearchSQL(ctx, s.Pool, query, maxResults, "english", myStopWords, ...) ...
+	// ... askyourdocs.KeywordSearchSQL(ctx, s.Pool, query, maxResults, s.TextSearchLanguage, myStopWords, ...) ...
 }
 ```
 
