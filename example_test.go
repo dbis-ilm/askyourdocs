@@ -64,9 +64,10 @@ func ExampleWrapUntrusted() {
 	// </mail>
 }
 
-func ExampleSanitizeAnswer() {
-	answer := "Siehe [Prüfungsordnung](https://www.example.org/po/2024) und " +
-		"[hier](https://attacker.example/?d=geheim) ![x](https://attacker.example/p.png)"
-	fmt.Println(askyourdocs.SanitizeAnswer(answer, []string{"https://www.example.org/po"}))
-	// Output: Siehe [Prüfungsordnung](https://www.example.org/po/2024) und hier x
+func ExampleSanitizeAnswerWith() {
+	answer := "See [the regulations](https://www.example.org/po/2024), " +
+		"[this](https://attacker.example/?d=secret) and https://attacker.example/x. " +
+		"![x](https://attacker.example/p.png)"
+	fmt.Println(askyourdocs.SanitizeAnswerWith(answer, []string{"https://www.example.org/po"}, "[link removed]"))
+	// Output: See [the regulations](https://www.example.org/po/2024), this and [link removed]. x
 }

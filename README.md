@@ -44,7 +44,7 @@ provider.go   — Providers, GenerateConfig: resolve "ollama/…", "gpustack/…
 logging.go    — SetupLogging, LogConfigFromEnv: log level, log file, JSON, off
 jobs.go       — JobStore: in-memory async job queue with progress, one background worker
 feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
-safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injection hardening
+safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswerWith: prompt-injection hardening
 evalhttp.go   — EvalJobHandler, EvalDatasetHandler, RestrictEvalPaths: HTTP contract for remote dataset fetching
 cmd/evalset/  — the evalset command
 injection.go  — DetectInjection, InjectionAttacks/Payloads/EvalCases: detection and eval material
@@ -280,14 +280,14 @@ A second layer, not a guarantee: a model cannot reliably tell instructions from 
 func SanitizeUntrusted(text string) string
 func WrapContext(context string) string
 func WrapUntrusted(tag, text string) string
-func SanitizeAnswer(answer string, allowedURLs []string) string
+func SanitizeAnswerWith(answer string, allowedURLs []string, linkRemoved string) string
 func AnswerLeaks(answer string, allowedURLs []string) []string
 ```
 
 - **`WrapContext`** — cleans the assembled context with `SanitizeUntrusted` (drops Unicode tag characters, zero-width and bidi-control characters, other control characters: ways to hide instructions from a human reader), defuses any copy of the delimiter in the text so a document can't close the block early, and wraps it in `<context>…</context>` (`ContextOpenTag`/`ContextCloseTag`). The app's system prompt must say that everything between the tags is quoted material and never instructions.
 - **`WrapUntrusted`** — `WrapContext` for any other delimiter: `WrapUntrusted("mail", body)` cleans the text, defuses copies of `<mail>`/`</mail>` in it and wraps it in those tags. `WrapContext` is `WrapUntrusted("context", …)`. The tag must be a plain name (it panics otherwise).
-- **`AnswerLeaks`** — the check side of `SanitizeAnswer`: returns what in an answer shows an attack succeeded (`canary`, `image`, `html`, `link:<url>`, `url:<url>`), empty if nothing. For eval checks on generated answers.
-- **`SanitizeAnswer`** — applied to a model reply: removes Markdown images (rendered automatically, so a URL with data in it leaks without a click) and raw HTML, and drops any link or bare URL that isn't among `allowedURLs` (the answer's own source URLs; a URL counts if it equals an entry or extends it at a path boundary). It needs the *complete* answer: when streaming, don't render images or follow links until the answer is done, then replace what was shown with the sanitized text. The removed-link marker is German (`[Link entfernt]`).
+- **`AnswerLeaks`** — the check side of `SanitizeAnswerWith`: returns what in an answer shows an attack succeeded (`canary`, `image`, `html`, `link:<url>`, `url:<url>`), empty if nothing. For eval checks on generated answers.
+- **`SanitizeAnswerWith`** — applied to a model reply: removes Markdown images (rendered automatically, so a URL with data in it leaks without a click) and raw HTML, and drops any link or bare URL that isn't among `allowedURLs` (the answer's own source URLs; a URL counts if it equals an entry or extends it at a path boundary). It needs the *complete* answer: when streaming, don't render images or follow links until the answer is done, then replace what was shown with the sanitized text. `linkRemoved` replaces a removed URL, in the app's language; `GermanLinkRemoved` is `[Link entfernt]`. The deprecated `SanitizeAnswer` is the same with that German marker.
 
 #### Detection and injection evals
 
