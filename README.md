@@ -35,7 +35,7 @@ pgstore.go    — PgvecStore (PostgreSQL + pgvector)
 ingest.go     — IngestSource interface + the IndexSource pipeline
 flow.go       — DefineProgressFlow: generic long-running ingest/crawl flow wiring
 retrieve.go   — PromptOptions, GenerateHyDEText, RerankScores, ReciprocalRankFusion
-search.go     — ExtractKeywords, ExtractQuotedPhrases, LocalvecKeywordSearch, KeywordSearchSQL
+search.go     — ExtractKeywords, ExtractQuotedPhrases, LocalvecKeywordSearch, KeywordSearchSQL (PgvecStore.KeywordSearch)
 eval.go       — RegisterEvaluators: custom/faithfulness, custom/answerRelevancy, custom/injectionResistance
 evalgen.go    — EvalCase[In], GenerateEvalSet: build a genkit eval:flow dataset from a directory of documents
 mcp.go        — MCPModeRequested, JSONToolHandler, ServeMCPStdio: expose Genkit tools over stdio
@@ -119,15 +119,33 @@ hand-roll either:
 
 ```go
 func NewLocalvecStore(g *genkit.Genkit, name string, emb ai.Embedder, dir string) (*LocalvecStore, error)
-func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int) (*PgvecStore, error)
+func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int, opts ...PgvecOption) (*PgvecStore, error)
 ```
 
 `LocalvecStore` wraps Genkit's `localvec` plugin — a file-based store, no
 database to run, good for a single-node app or a demo. `PgvecStore` wraps
-PostgreSQL + pgvector, with schema creation and automatic migration if the
-embedding dimension changes. Both expose a `Retriever ai.Retriever` field
+PostgreSQL + pgvector, with schema creation. Both expose a `Retriever ai.Retriever` field
 (`PgvecStore` additionally exposes `Pool` and `Embedder`) for callers that
 want to retrieve directly rather than through `IndexSource`'s write path.
+
+`PgvecStore` takes two options:
+
+- `WithTextSearchLanguages(langs...)` — the Postgres text-search
+  configurations for full-text search (default `"german"`), stored in the
+  `TextSearchLanguages` field. Every chunk is stemmed with each of them into
+  one generated `tsv` column with a GIN index on it, so a corpus mixing
+  languages — even within one document, like a German page full of English
+  terms — needs no language detection. `PgvecStore.KeywordSearch` matches
+  the query stemmed with all of them. Each extra language costs roughly one
+  more tsvector per row in the table and the index. A column built from a
+  different set is rebuilt at startup (the column's comment records the
+  set); that rewrites the table, so expect a pause on a large one.
+- `WithResetOnDimensionMismatch()` — when the stored vectors have a
+  different dimension than `embeddingDim` (e.g. after switching embedding
+  models), delete every stored document and migrate the column. Without it,
+  `NewPgvecStore` fails with `ErrEmbeddingDimMismatch` instead, so a wrong
+  dimension in a config can't wipe the index. An empty table is always
+  migrated.
 
 `PgvecStore.Retrieve` does a plain, unfiltered similarity search. An app
 wanting SQL-side filtering (date ranges, tags, ...) runs its own query
@@ -311,11 +329,13 @@ func LocalvecKeywordSearch(dbPath string, query string, maxResults int, stopWord
 func (s *LocalvecStore) KeywordSearch(ctx context.Context, query string, maxResults int, stopWords map[string]bool, filter func(meta map[string]any) bool) ([]*ai.Document, error)
 
 func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, maxResults int, language string, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error)
+func (s *PgvecStore) KeywordSearch(ctx context.Context, query string, maxResults int, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error)
 ```
 
 Same split as the retrieval-quality helpers above: the search mechanics are generic, two things stay the caller's call:
 
-- **Language.** `ExtractKeywords` takes its stop-word set as a parameter rather than assuming one (a German-language app passes a German stop-word list plus its own meta-query words like "finde"/"zeige"; an English one passes its own). `KeywordSearchSQL` similarly takes a Postgres text-search configuration name (`"german"`, `"english"`, `"simple"`, ...) — always a fixed, caller-controlled string, interpolated into the query text because bind parameters can't carry a configuration name.
+- **Language.** `ExtractKeywords` takes its stop-word set as a parameter rather than assuming one (a German-language app passes a German stop-word list plus its own meta-query words like "finde"/"zeige"; an English one passes its own). `KeywordSearchSQL` similarly takes a Postgres text-search configuration name (`"german"`, `"english"`, `"simple"`, ...) — always a fixed, caller-controlled string, interpolated into the query text because bind parameters can't carry a configuration name, and rejected unless it is a plain lowercase identifier. The full-text stage queries PgvecStore's `tsv` column, so its index is used whatever configuration the query names, but the stemmed query only matches lexemes the column holds: use one of the store's `TextSearchLanguages`, or call `PgvecStore.KeywordSearch`, which queries with all of them.
+- **Errors.** A failing stage query is logged and skipped so the other stages' results survive; `KeywordSearchSQL` returns an error only when every query it ran failed (e.g. the database is down) or `ctx` is done — so an empty result really means no matches.
 - **Filtering.** Same shape as `Retrieve`'s split: `LocalvecKeywordSearch` takes a `func(meta map[string]any) bool` predicate, `KeywordSearchSQL` takes an `extraWhere` SQL fragment + `extraArgs` the caller ANDs in (placeholders starting at `$3`, since every query already binds the search term as `$1` and the row limit as `$2`). `nil`/`""` means no filter.
 
 Both backends run the same three-stage strategy: exact phrase ILIKE for quoted substrings (always wins, bypasses stemming), ILIKE on a truncated prefix of long keywords (bridges inflections a stemmer misses), then full-text/substring scoring for the rest — results merged and deduplicated by document text, capped at `maxResults`.
@@ -552,7 +572,7 @@ func (s *myStore) Retrieve(ctx context.Context, query *ai.Document, k int, filte
 }
 
 func (s *myStore) KeywordSearch(ctx context.Context, query string, maxResults int, filter myFilter) ([]*ai.Document, error) {
-	// ... askyourdocs.KeywordSearchSQL(ctx, s.Pool, query, maxResults, "english", myStopWords, ...) ...
+	// ... s.PgvecStore.KeywordSearch(ctx, query, maxResults, myStopWords, extraWhere, extraArgs) ...
 }
 ```
 

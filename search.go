@@ -19,12 +19,14 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -70,7 +72,7 @@ func ExtractKeywords(text string, stopWords map[string]bool) []string {
 	seen := make(map[string]bool)
 	var keywords []string
 	for _, w := range words {
-		if len(w) < 3 || stopWords[w] || seen[w] {
+		if utf8.RuneCountInString(w) < 3 || stopWords[w] || seen[w] {
 			continue
 		}
 		seen[w] = true
@@ -221,6 +223,26 @@ func capPerDocument[T any](items []T, maxPer int, key func(T) string) []T {
 	return kept
 }
 
+// likeStem shortens a long keyword by its last two characters (runes, not
+// bytes, so an umlaut is never cut in half) to bridge inflected forms the
+// stemmer misses, e.g. "prüfungsordnungen" also matching "prüfungsordnung".
+// Keywords of up to 10 characters are used as they are.
+func likeStem(kw string) string {
+	r := []rune(kw)
+	if len(r) > 10 {
+		return string(r[:len(r)-2])
+	}
+	return kw
+}
+
+// likeEscaper escapes LIKE's wildcards and its escape character, so user
+// text matches literally.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// escapeLike makes s match itself literally inside a LIKE pattern used
+// with ESCAPE '\'.
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
 // scanKeywordQuery runs q against pool and scans its rows with ScanDocs,
 // closing the rows regardless of outcome.
 func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []any) ([]*ai.Document, error) {
@@ -234,14 +256,16 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 
 // KeywordSearchSQL runs the same keyword/phrase search as
 // LocalvecStore.KeywordSearch against a PostgreSQL table shaped like
-// PgvecStore's documents table (content, metadata, parent_text columns):
+// PgvecStore's documents table (content, metadata, parent_text and the
+// generated tsv column):
 //
 //  1. Exact phrase ILIKE for quoted substrings — always wins, bypasses
 //     stemming entirely, good for technical terms/compound nouns.
 //  2. ILIKE on a truncated prefix of any long (>=8 char) keyword — bridges
 //     inflections the stemmer misses (e.g. a word stemming differently than
 //     its related forms).
-//  3. Full-text search via websearch_to_tsquery, one query per keyword run
+//  3. Full-text search on the tsv column via websearch_to_tsquery, one query
+//     per keyword run
 //     independently — so a high-frequency keyword can't dilute the ranking
 //     of a more specific one sharing the same query.
 //
@@ -250,20 +274,38 @@ func scanKeywordQuery(ctx context.Context, pool *pgxpool.Pool, q string, args []
 // chunks can't single-handedly fill the result budget and starve out a
 // document that only matches once or twice. Results from all three stages
 // are then merged and deduplicated by document text, and capped at
-// maxResults overall. language is a Postgres text-search configuration
-// name ("german", "english", "simple", ...) — always a fixed string the
-// caller controls, never user input, so it's safe to interpolate into the
-// query text (bind parameters don't support configuration names). extraWhere
+// maxResults overall. language is the Postgres text-search configuration
+// ("german", "english", "simple", ...) the full-text stage stems the query
+// with — always a fixed string the caller controls, never user input, so
+// it's safe to interpolate into the query text (bind parameters don't
+// support configuration names). It should be one of the store's
+// TextSearchLanguages, or the stemmed query won't match the stored
+// lexemes; PgvecStore.KeywordSearch queries with all of them. extraWhere
 // is ANDed into every query's WHERE clause with extraArgs as its bind
 // values, letting the caller add its own filter (e.g. a date/tag
 // restriction); every query already binds the search term as $1 and the row
 // limit as $2, so extraWhere's placeholders start at $3. Pass "", nil for no
 // filter.
+//
+// A failing query is logged and skipped, so one bad stage doesn't lose the
+// others' results. KeywordSearchSQL only returns an error when every query
+// it ran failed (e.g. the database is unreachable), when ctx is done, or
+// when language is not a plain identifier.
 func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, maxResults int, language string, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
+	return keywordSearchSQL(ctx, pool, query, maxResults, []string{language}, stopWords, extraWhere, extraArgs)
+}
+
+// keywordSearchSQL is KeywordSearchSQL with the full-text stage matching
+// the query stemmed with any of languages.
+func keywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, maxResults int, languages []string, stopWords map[string]bool, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
 	keywords := ExtractKeywords(query, stopWords)
 	phrases := ExtractQuotedPhrases(query)
 	if len(keywords) == 0 && len(phrases) == 0 {
 		return nil, nil
+	}
+	languages, err := normalizeTextSearchLanguages(languages)
+	if err != nil {
+		return nil, err
 	}
 
 	filterClause := ""
@@ -272,6 +314,21 @@ func KeywordSearchSQL(ctx context.Context, pool *pgxpool.Pool, query string, max
 	}
 	args := func(term any) []any {
 		return append([]any{term, maxResults}, extraArgs...)
+	}
+
+	// run executes one stage query, logging and counting failures so the
+	// search can still report an error when nothing succeeded at all.
+	var ran int
+	var errs []error
+	run := func(stage, q string, term any) ([]*ai.Document, bool) {
+		ran++
+		got, err := scanKeywordQuery(ctx, pool, q, args(term))
+		if err != nil {
+			slog.WarnContext(ctx, "KeywordSearchSQL: query failed", "stage", stage, "err", err)
+			errs = append(errs, fmt.Errorf("%s query: %w", stage, err))
+			return nil, false
+		}
+		return got, true
 	}
 
 	seen := make(map[string]bool)
@@ -305,7 +362,7 @@ WITH matches AS (
     SELECT content, metadata, parent_text,
            row_number() OVER (PARTITION BY %[1]s ORDER BY id) AS rn
     FROM documents
-    WHERE LOWER(content || ' ' || parent_text) LIKE $1%[2]s
+    WHERE LOWER(content || ' ' || parent_text) LIKE $1 ESCAPE '\'%[2]s
 )
 SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
 LIMIT $2`, docKey, filterClause, maxPerDocument)
@@ -313,9 +370,11 @@ LIMIT $2`, docKey, filterClause, maxPerDocument)
 		if len(docs) >= maxResults {
 			break
 		}
-		got, err := scanKeywordQuery(ctx, pool, qPhrase, args("%"+phrase+"%"))
-		if err != nil {
-			slog.WarnContext(ctx, "KeywordSearchSQL: phrase query failed", "err", err)
+		got, ok := run("phrase", qPhrase, "%"+escapeLike(phrase)+"%")
+		if !ok {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		merge(got)
@@ -327,52 +386,57 @@ WITH matches AS (
     SELECT content, metadata, parent_text,
            row_number() OVER (PARTITION BY %[1]s ORDER BY id) AS rn
     FROM documents
-    WHERE LOWER(content || ' ' || parent_text) LIKE $1%[2]s
+    WHERE LOWER(content || ' ' || parent_text) LIKE $1 ESCAPE '\'%[2]s
 )
 SELECT content, metadata, parent_text FROM matches WHERE rn <= %[3]d
 LIMIT $2`, docKey, filterClause, maxPerDocument)
 	for _, kw := range keywords {
-		if len(kw) < 8 || len(docs) >= maxResults {
+		if utf8.RuneCountInString(kw) < 8 || len(docs) >= maxResults {
 			continue
 		}
-		stem := kw
-		if len(stem) > 10 {
-			stem = stem[:len(stem)-2]
-		}
-		got, err := scanKeywordQuery(ctx, pool, qILIKE, args("%"+stem+"%"))
-		if err != nil {
-			slog.WarnContext(ctx, "KeywordSearchSQL: ILIKE query failed", "err", err)
+		got, ok := run("ILIKE", qILIKE, "%"+escapeLike(likeStem(kw))+"%")
+		if !ok {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		merge(got)
 	}
 
 	// 3. Full-text search, one query per keyword.
+	tsq := tsqueryExpr(languages, "$1")
 	qFTS := fmt.Sprintf(`
 WITH matches AS (
     SELECT content, metadata, parent_text,
-           ts_rank(to_tsvector('%[1]s', content || ' ' || parent_text), websearch_to_tsquery('%[1]s', $1)) AS rank,
+           ts_rank(tsv, %[1]s) AS rank,
            row_number() OVER (
                PARTITION BY %[3]s
-               ORDER BY ts_rank(to_tsvector('%[1]s', content || ' ' || parent_text), websearch_to_tsquery('%[1]s', $1)) DESC
+               ORDER BY ts_rank(tsv, %[1]s) DESC
            ) AS rn
     FROM documents
-    WHERE to_tsvector('%[1]s', content || ' ' || parent_text) @@ websearch_to_tsquery('%[1]s', $1)%[2]s
+    WHERE tsv @@ %[1]s%[2]s
 )
 SELECT content, metadata, parent_text FROM matches
 WHERE rn <= %[4]d
 ORDER BY rank DESC
-LIMIT $2`, language, filterClause, docKey, maxPerDocument)
+LIMIT $2`, tsq, filterClause, docKey, maxPerDocument)
 	for _, kw := range keywords {
 		if len(docs) >= maxResults {
 			break
 		}
-		got, err := scanKeywordQuery(ctx, pool, qFTS, args(kw))
-		if err != nil {
-			slog.WarnContext(ctx, "KeywordSearchSQL: FTS query failed", "err", err)
+		got, ok := run("fts", qFTS, kw)
+		if !ok {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		merge(got)
+	}
+
+	if ran > 0 && len(errs) == ran {
+		return nil, fmt.Errorf("keyword search: all %d queries failed: %w", ran, errors.Join(errs...))
 	}
 
 	if len(docs) > maxResults {

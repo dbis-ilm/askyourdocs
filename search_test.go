@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"unicode/utf8"
 )
 
 var testStopWords = map[string]bool{
@@ -227,5 +228,60 @@ func TestKeywordSearchSQLNoKeywordsReturnsNilWithoutQueryingPool(t *testing.T) {
 	}
 	if docs != nil {
 		t.Errorf("docs = %v, want nil when the query has no usable keywords", docs)
+	}
+}
+
+func TestExtractKeywordsCountsCharactersNotBytes(t *testing.T) {
+	// "öl" is 2 characters but 3 bytes: too short, like any 2-letter word.
+	got := ExtractKeywords("öl für autos", nil)
+	if want := []string{"für", "autos"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ExtractKeywords = %v, want %v", got, want)
+	}
+}
+
+func TestContentWordsCountsCharactersNotBytes(t *testing.T) {
+	// "für" is 3 characters (4 bytes) and must be skipped like "und".
+	got := contentWords("Anträge für Prüfungen und Fristen")
+	for _, w := range []string{"für", "und"} {
+		if got[w] {
+			t.Errorf("contentWords kept short word %q", w)
+		}
+	}
+	for _, w := range []string{"anträge", "prüfungen", "fristen"} {
+		if !got[w] {
+			t.Errorf("contentWords dropped %q", w)
+		}
+	}
+}
+
+func TestLikeStemCutsRunesNotBytes(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"fahrzeugübergröße", "fahrzeugübergrö"}, // a byte cut would split the ß
+		{"prüfungsordnungen", "prüfungsordnung"},
+		{"ordnungen", "ordnungen"},   // up to 10 characters: unchanged
+		{"übergrößeö", "übergrößeö"}, // 10 characters, 14 bytes: unchanged
+		{"übergrößeöä", "übergröße"}, // 11 characters: two dropped
+	} {
+		got := likeStem(tc.in)
+		if got != tc.want {
+			t.Errorf("likeStem(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("likeStem(%q) = %q is not valid UTF-8", tc.in, got)
+		}
+	}
+}
+
+func TestEscapeLike(t *testing.T) {
+	for in, want := range map[string]string{
+		"raum a_1":      `raum a\_1`,
+		"100%":          `100\%`,
+		`c:\temp`:       `c:\\temp`,
+		`50%_\`:         `50\%\_\\`,
+		"keine zeichen": "keine zeichen",
+	} {
+		if got := escapeLike(in); got != want {
+			t.Errorf("escapeLike(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

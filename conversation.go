@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/firebase/genkit/go/ai"
 )
@@ -158,7 +159,7 @@ func contentWords(text string) map[string]bool {
 	words := map[string]bool{}
 	var cur strings.Builder
 	flush := func() {
-		if w := strings.ToLower(cur.String()); len(w) >= 4 {
+		if w := strings.ToLower(cur.String()); utf8.RuneCountInString(w) >= 4 {
 			words[w] = true
 		}
 		cur.Reset()
