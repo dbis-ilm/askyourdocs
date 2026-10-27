@@ -351,40 +351,44 @@ func (s *PgvecStore) Index(ctx context.Context, docs []*ai.Document) error {
 		return fmt.Errorf("embed: got %d embeddings for %d documents", len(embedResp.Embeddings), len(docs))
 	}
 
+	// Prepare every row first, so a document whose metadata can't be
+	// serialized fails the call before anything is written.
+	const q = `INSERT INTO documents (content, embedding, metadata, parent_text) VALUES ($1, $2, $3, $4)`
+	batch := &pgx.Batch{}
+	for i, doc := range docs {
+		metaJSON := []byte("{}")
+		parentText := ""
+		if doc.Metadata != nil {
+			b, err := json.Marshal(doc.Metadata)
+			if err != nil {
+				return fmt.Errorf("doc %d: marshal metadata: %w", i, err)
+			}
+			metaJSON = b
+			if pt, ok := doc.Metadata["parentText"].(string); ok {
+				parentText = pt
+			}
+		}
+		vec := pgvector.NewVector(embedResp.Embeddings[i].Embedding)
+		batch.Queue(q, DocText(doc), vec, metaJSON, parentText)
+	}
+
+	// One round trip for all rows instead of one per row, still in a single
+	// transaction.
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	const q = `INSERT INTO documents (content, embedding, metadata, parent_text) VALUES ($1, $2, $3, $4)`
-
-	for i, doc := range docs {
-		// Extract text content.
-		var content strings.Builder
-		for _, part := range doc.Content {
-			content.WriteString(part.Text)
-		}
-
-		// Serialize metadata to JSON.
-		metaJSON := []byte("{}")
-		if doc.Metadata != nil {
-			metaJSON, _ = json.Marshal(doc.Metadata)
-		}
-
-		// Extract parentText from metadata.
-		parentText := ""
-		if doc.Metadata != nil {
-			if pt, ok := doc.Metadata["parentText"].(string); ok {
-				parentText = pt
-			}
-		}
-
-		vec := pgvector.NewVector(embedResp.Embeddings[i].Embedding)
-
-		if _, err := tx.Exec(ctx, q, content.String(), vec, metaJSON, parentText); err != nil {
+	results := tx.SendBatch(ctx, batch)
+	for i := range docs {
+		if _, err := results.Exec(); err != nil {
+			results.Close()
 			return fmt.Errorf("insert doc %d: %w", i, err)
 		}
+	}
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("insert: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

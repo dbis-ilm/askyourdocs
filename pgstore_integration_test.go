@@ -29,6 +29,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -534,5 +535,47 @@ func TestIntegrationKeywordSearchMatchesLikeWildcardsLiterally(t *testing.T) {
 	var n int
 	if !rows.Next() || rows.Scan(&n) != nil || n != 1 {
 		t.Fatalf("ILIKE stage matched %d rows (err %v), want 1", n, rows.Err())
+	}
+}
+
+func TestIntegrationPgvecIndexBatchIsAtomic(t *testing.T) {
+	dsn := integrationDSN(t)
+	pool := resetDB(t, dsn)
+	ctx := context.Background()
+
+	s, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatalf("NewPgvecStore: %v", err)
+	}
+	docs := make([]*ai.Document, 250)
+	for i := range docs {
+		docs[i] = ai.DocumentFromText(fmt.Sprintf("Abschnitt %d", i), map[string]any{"source": "gross.pdf", "parentText": "Kapitel"})
+	}
+	mustIndex(t, s, docs...)
+	if n := countDocs(t, pool); n != 250 {
+		t.Fatalf("%d documents after batch, want 250", n)
+	}
+	var parent string
+	if err := pool.QueryRow(ctx, `SELECT parent_text FROM documents LIMIT 1`).Scan(&parent); err != nil || parent != "Kapitel" {
+		t.Fatalf("parent_text = %q, %v; want Kapitel", parent, err)
+	}
+
+	// Postgres rejects a NUL byte in text: the failing row in the middle
+	// of a batch must leave none of the batch behind.
+	bad := []*ai.Document{
+		ai.DocumentFromText("davor", nil),
+		ai.DocumentFromText("kaputt\x00", nil),
+		ai.DocumentFromText("danach", nil),
+	}
+	err = s.Index(ctx, bad)
+	if err == nil || !strings.Contains(err.Error(), "insert doc 1") {
+		t.Fatalf("Index with a NUL byte: err = %v, want insert doc 1 failure", err)
+	}
+	if n := countDocs(t, pool); n != 250 {
+		t.Fatalf("%d documents after failed batch, want 250 (rolled back)", n)
+	}
+
+	if n, err := s.DeleteBySource(ctx, "gross.pdf"); err != nil || n != 250 {
+		t.Fatalf("DeleteBySource = %d, %v; want 250", n, err)
 	}
 }
