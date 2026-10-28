@@ -19,6 +19,7 @@ package askyourdocs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -380,5 +381,85 @@ func TestGPUStackConfigReachesTheWire(t *testing.T) {
 	// The old wire-shaped map is refused instead of half applied.
 	if _, err := send(map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}); err == nil {
 		t.Error("old wire-shaped map config: got nil error")
+	}
+}
+
+// fakeGoogleAI answers the Gemini API's embedding and generate calls and
+// records each request's path and JSON body.
+type fakeGoogleAI struct {
+	*httptest.Server
+	mu    sync.Mutex
+	paths []string
+	body  map[string]any
+}
+
+func newFakeGoogleAI(t *testing.T) *fakeGoogleAI {
+	t.Helper()
+	f := &fakeGoogleAI{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.paths = append(f.paths, r.URL.Path)
+		f.body = body
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, ":batchEmbedContents"):
+			fmt.Fprint(w, `{"embeddings":[{"values":[0.1,0.2,0.3]}]}`)
+		case strings.HasSuffix(r.URL.Path, ":generateContent"):
+			fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"hallo"}]},"finishReason":"STOP"}]}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *fakeGoogleAI) last() (string, map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.paths) == 0 {
+		return "", nil
+	}
+	return f.paths[len(f.paths)-1], f.body
+}
+
+func TestProvidersGoogleAI(t *testing.T) {
+	srv := newFakeGoogleAI(t)
+	p, err := NewProviders(ProviderConfig{GoogleAIAPIKey: "test-key"}, nil, "googleai/gemini-2.5-flash", "googleai/gemini-embedding-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.googleAI.BaseURL = srv.URL
+	ctx := context.Background()
+	g := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
+
+	llm, err := p.Model(g, "googleai/gemini-2.5-flash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := genkit.Generate(ctx, g, ai.WithModel(llm), ai.WithPrompt("hi"))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if resp.Text() != "hallo" {
+		t.Errorf("answer = %q", resp.Text())
+	}
+
+	emb, err := p.Embedder(g, "googleai/gemini-embedding-001", 768)
+	if err != nil {
+		t.Fatal(err)
+	}
+	er, err := emb.Embed(ctx, &ai.EmbedRequest{Input: []*ai.Document{ai.DocumentFromText("Mensa", nil)}})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(er.Embeddings) != 1 {
+		t.Fatalf("got %d embeddings, want 1", len(er.Embeddings))
+	}
+	if path, _ := srv.last(); !strings.HasSuffix(path, "/models/gemini-embedding-001:batchEmbedContents") {
+		t.Errorf("embed request went to %s", path)
 	}
 }

@@ -243,7 +243,7 @@ func (p *Providers) Model(g *genkit.Genkit, spec string) (ai.Model, error) {
 		genkit.RegisterAction(g, action)
 		m = action
 	case provider == ProviderGoogleAI && p.googleAI != nil:
-		m = googlegenai.GoogleAIModel(g, name)
+		m = genkit.LookupModel(g, api.NewName(ProviderGoogleAI, name))
 	default:
 		return nil, fmt.Errorf("model spec %q was not passed to NewProviders", spec)
 	}
@@ -276,10 +276,7 @@ func (p *Providers) Embedder(g *genkit.Genkit, spec string, dim int) (ai.Embedde
 		genkit.RegisterAction(g, action)
 		e = action
 	case provider == ProviderGoogleAI && p.googleAI != nil:
-		var err error
-		if e, err = p.googleAI.DefineEmbedder(g, name, &ai.EmbedderOptions{Dimensions: dim}); err != nil {
-			return nil, fmt.Errorf("embedder %q: %w", spec, err)
-		}
+		e = genkit.LookupEmbedder(g, api.NewName(ProviderGoogleAI, name))
 	default:
 		return nil, fmt.Errorf("embedder spec %q was not passed to NewProviders", spec)
 	}
