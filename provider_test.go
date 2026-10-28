@@ -332,3 +332,53 @@ func TestGPUStackBaseURL(t *testing.T) {
 		}
 	}
 }
+
+func TestGPUStackConfigReachesTheWire(t *testing.T) {
+	srv := newFakeServer(t, map[string]string{
+		"/v1/chat/completions": `{"id":"1","object":"chat.completion","created":1,"model":"qwen3-8b",
+			"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
+	})
+	p, err := NewProviders(ProviderConfig{GPUStackURL: srv.URL}, nil, "gpustack/qwen3-8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	g := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
+	llm, err := p.Model(g, "gpustack/qwen3-8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(cfg any) (map[string]any, error) {
+		t.Helper()
+		_, err := genkit.Generate(ctx, g, ai.WithModel(llm), ai.WithPrompt("hi"), ai.WithConfig(cfg))
+		return srv.body("/v1/chat/completions"), err
+	}
+
+	body, err := send(GenerateConfig("gpustack/qwen3-8b", GenerateOptions{Think: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kwargs, _ := body["chat_template_kwargs"].(map[string]any); kwargs["enable_thinking"] != true {
+		t.Errorf("Think: chat_template_kwargs = %v, want enable_thinking=true", body["chat_template_kwargs"])
+	}
+	if _, ok := body["max_tokens"]; ok {
+		t.Errorf("MaxTokens 0: max_tokens = %v, want it unset", body["max_tokens"])
+	}
+
+	// A JSON config, as the Developer UI sends it, with a passthrough field.
+	body, err = send(map[string]any{"maxOutputTokens": 50, "extra": map[string]any{"temperature": 0.2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["max_tokens"] != float64(50) || body["temperature"] != 0.2 {
+		t.Errorf("map config: max_tokens = %v, temperature = %v; want 50, 0.2", body["max_tokens"], body["temperature"])
+	}
+	if _, ok := body["chat_template_kwargs"]; ok {
+		t.Errorf("enableThinking unset: chat_template_kwargs = %v, want it unset", body["chat_template_kwargs"])
+	}
+
+	// The old wire-shaped map is refused instead of half applied.
+	if _, err := send(map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}); err == nil {
+		t.Error("old wire-shaped map config: got nil error")
+	}
+}
