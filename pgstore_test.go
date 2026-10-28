@@ -111,6 +111,31 @@ func TestPgvecStoreIndexRejectsEmbeddingCountMismatch(t *testing.T) {
 	}
 }
 
+// countEmbedder returns one 3-dimensional embedding per input.
+type countEmbedder struct{ recordingEmbedder }
+
+func (e *countEmbedder) Embed(ctx context.Context, req *ai.EmbedRequest) (*ai.EmbedResponse, error) {
+	resp := &ai.EmbedResponse{}
+	for range req.Input {
+		resp.Embeddings = append(resp.Embeddings, &ai.Embedding{Embedding: []float32{1, 0, 0}})
+	}
+	return resp, nil
+}
+
+func TestPgvecStoreIndexRejectsUnmarshalableMetadataBeforeWriting(t *testing.T) {
+	// A channel can't be JSON-encoded. Index must fail before touching the
+	// (nil) pool instead of storing "{}" in place of the metadata.
+	s := &PgvecStore{Embedder: &countEmbedder{}}
+	docs := []*ai.Document{
+		ai.DocumentFromText("ok", map[string]any{"url": "https://a.example"}),
+		ai.DocumentFromText("bad", map[string]any{"ch": make(chan int)}),
+	}
+	err := s.Index(context.Background(), docs)
+	if err == nil || !strings.Contains(err.Error(), "doc 1: marshal metadata") {
+		t.Fatalf("Index error = %v, want marshal error for doc 1", err)
+	}
+}
+
 func TestKeywordSearchSQLRejectsInvalidLanguage(t *testing.T) {
 	_, err := KeywordSearchSQL(context.Background(), nil, "Prüfungsordnung", 10, "german'--", testStopWords, "", nil)
 	if err == nil {

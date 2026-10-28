@@ -38,7 +38,7 @@ import (
 // single file. Pool and Embedder are exported so an app needing more than
 // the plain, unfiltered Retrieve below (e.g. filtered retrieval, keyword
 // search, source administration) can run its own queries against the same
-// connection and embedder — see the ask-pdf app's pgvecStore, which embeds this
+// connection and embedder — see the ask-the-records app's pgvecStore, which embeds this
 // type and adds exactly that.
 type PgvecStore struct {
 	Pool      *pgxpool.Pool
@@ -257,9 +257,20 @@ CREATE TABLE IF NOT EXISTS documents (
 		return err
 	}
 
-	// Trigram index for LIKE '%…%' lookups (e.g. an app's own KeywordSearch).
-	// Without it such lookups are sequential scans; see the ask-pdf app's
-	// KeywordSearch for the measured cost of skipping this.
+	// Expression indexes for the per-document lookups: DeleteByURL,
+	// DeleteBySource, and an app's own source administration, which would
+	// otherwise scan the whole table.
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_documents_url ON documents ((metadata->>'url'))`,
+		`CREATE INDEX IF NOT EXISTS idx_documents_source ON documents ((metadata->>'source'))`,
+	} {
+		if _, err := s.Pool.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("create metadata index: %w", err)
+		}
+	}
+
+	// Trigram index for LIKE '%…%' lookups (KeywordSearchSQL's phrase and
+	// ILIKE stages, or an app's own). Without it they are sequential scans.
 	const trgmSQL = `CREATE INDEX IF NOT EXISTS idx_documents_trgm
 	  ON documents USING gin ((lower(content || ' ' || parent_text)) gin_trgm_ops)`
 	if _, err := s.Pool.Exec(ctx, trgmSQL); err != nil {
@@ -351,40 +362,44 @@ func (s *PgvecStore) Index(ctx context.Context, docs []*ai.Document) error {
 		return fmt.Errorf("embed: got %d embeddings for %d documents", len(embedResp.Embeddings), len(docs))
 	}
 
+	// Prepare every row first, so a document whose metadata can't be
+	// serialized fails the call before anything is written.
+	const q = `INSERT INTO documents (content, embedding, metadata, parent_text) VALUES ($1, $2, $3, $4)`
+	batch := &pgx.Batch{}
+	for i, doc := range docs {
+		metaJSON := []byte("{}")
+		parentText := ""
+		if doc.Metadata != nil {
+			b, err := json.Marshal(doc.Metadata)
+			if err != nil {
+				return fmt.Errorf("doc %d: marshal metadata: %w", i, err)
+			}
+			metaJSON = b
+			if pt, ok := doc.Metadata["parentText"].(string); ok {
+				parentText = pt
+			}
+		}
+		vec := pgvector.NewVector(embedResp.Embeddings[i].Embedding)
+		batch.Queue(q, DocText(doc), vec, metaJSON, parentText)
+	}
+
+	// One round trip for all rows instead of one per row, still in a single
+	// transaction.
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	const q = `INSERT INTO documents (content, embedding, metadata, parent_text) VALUES ($1, $2, $3, $4)`
-
-	for i, doc := range docs {
-		// Extract text content.
-		var content strings.Builder
-		for _, part := range doc.Content {
-			content.WriteString(part.Text)
-		}
-
-		// Serialize metadata to JSON.
-		metaJSON := []byte("{}")
-		if doc.Metadata != nil {
-			metaJSON, _ = json.Marshal(doc.Metadata)
-		}
-
-		// Extract parentText from metadata.
-		parentText := ""
-		if doc.Metadata != nil {
-			if pt, ok := doc.Metadata["parentText"].(string); ok {
-				parentText = pt
-			}
-		}
-
-		vec := pgvector.NewVector(embedResp.Embeddings[i].Embedding)
-
-		if _, err := tx.Exec(ctx, q, content.String(), vec, metaJSON, parentText); err != nil {
+	results := tx.SendBatch(ctx, batch)
+	for i := range docs {
+		if _, err := results.Exec(); err != nil {
+			results.Close()
 			return fmt.Errorf("insert doc %d: %w", i, err)
 		}
+	}
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("insert: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -417,7 +432,7 @@ func (s *PgvecStore) retrieve(ctx context.Context, req *ai.RetrieverRequest) (*a
 
 // Retrieve runs a plain vector similarity search with no filtering — an app
 // needing SQL-side filtering (date ranges, tags, ...) builds that itself
-// against Pool/Embedder instead (see the ask-pdf app's filtered Retrieve).
+// against Pool/Embedder instead (see the ask-the-records app's filtered Retrieve).
 func (s *PgvecStore) Retrieve(ctx context.Context, query *ai.Document, k int) ([]*ai.Document, error) {
 	if query == nil {
 		return nil, fmt.Errorf("retrieve: query document is nil")
@@ -450,7 +465,7 @@ LIMIT $2`
 
 // ScanDocs reads content, metadata and parent text rows into documents. It
 // expects exactly those three columns, in that order — the shape every
-// query in this file and in the ask-pdf app's pgvecStore selects.
+// query in this file and in the ask-the-records app's pgvecStore selects.
 func ScanDocs(rows pgx.Rows) ([]*ai.Document, error) {
 	var docs []*ai.Document
 	for rows.Next() {

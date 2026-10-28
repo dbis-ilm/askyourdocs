@@ -8,6 +8,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Postgres + pgvector for the integration-tagged tests (pgstore.go,
+    # KeywordSearchSQL), which nothing else exercises.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: ayd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ayd"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -22,13 +37,17 @@ jobs:
           if [ -n "$out" ]; then echo "Not gofmt-formatted:"; echo "$out"; exit 1; fi
 
       - name: vet
-        run: go vet ./...
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
 
       - name: build
         run: go build ./...
 
       - name: test
-        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/ayd?sslmode=disable
+        run: go test ./... -tags integration -race -coverprofile=coverage.out -covermode=atomic
 
       - uses: codecov/codecov-action@v5
         with:
