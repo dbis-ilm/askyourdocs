@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package engine is a small, reusable RAG engine for "ask your documents"
+// Package askyourdocs is a small, reusable RAG engine for "ask your documents"
 // apps: it turns PDF, .docx and web pages into retrievable chunks, indexes
 // them in a vector store (file-based LocalvecStore or PostgreSQL-backed
 // PgvecStore), and offers the retrieval pieces around that core — keyword
@@ -22,10 +22,8 @@
 // building blocks: an async job queue, a feedback log, multi-turn helpers,
 // prompt-injection hardening and evaluation helpers.
 //
-// The module path is github.com/dbis-ilm/askyourdocs but the package name is
-// engine, so import it with that name spelled out:
-//
-//	import engine "github.com/dbis-ilm/askyourdocs"
+// The package used to be named engine. Code importing it as
+// engine "github.com/dbis-ilm/askyourdocs" keeps working with that alias.
 //
 // The design boundary: generic RAG mechanics live here; anything
 // app-specific — what metadata a chunk carries, prompt wording, auth, admin
@@ -35,4 +33,4 @@
 //
 // See the README for how the pieces fit together and why several of the
 // trickier API decisions were made the way they were.
-package engine
+package askyourdocs

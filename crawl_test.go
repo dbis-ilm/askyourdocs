@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 import (
 	"context"
@@ -329,7 +329,7 @@ func TestRunCrawlFollowsLinksWithinPrefixAndIndexes(t *testing.T) {
 	var indexedURLs []string
 	indexPage := func(ctx context.Context, pageURL string, paras []Paragraph) (int, error) {
 		indexedURLs = append(indexedURLs, pageURL)
-		return 1, nil
+		return 3, nil // chunks per page, so pages and chunks can't be confused
 	}
 
 	result, err := RunCrawl(context.Background(), CrawlInput{
@@ -347,6 +347,9 @@ func TestRunCrawlFollowsLinksWithinPrefixAndIndexes(t *testing.T) {
 	}
 	if result.PagesIndexed != 2 {
 		t.Errorf("PagesIndexed = %d, want 2", result.PagesIndexed)
+	}
+	if result.ChunksIndexed != 6 {
+		t.Errorf("ChunksIndexed = %d, want 6", result.ChunksIndexed)
 	}
 	if len(indexedURLs) != 2 {
 		t.Errorf("indexed URLs = %v, want 2 entries", indexedURLs)
@@ -395,7 +398,7 @@ func TestRunCrawlReportsProgress(t *testing.T) {
 		MaxPages: 5,
 		DelayMs:  1,
 	}, t.TempDir(), func(context.Context, string, []Paragraph) (int, error) { return 1, nil },
-		func(msg string) { progressed = append(progressed, msg) })
+		ProgressMessages(func(msg string) { progressed = append(progressed, msg) }, GermanProgress))
 	if err != nil {
 		t.Fatalf("RunCrawl: %v", err)
 	}

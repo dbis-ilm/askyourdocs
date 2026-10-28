@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 import (
 	"context"
@@ -67,7 +67,7 @@ func runIndexSource(t *testing.T, store VectorStore, src IngestSource) (ingestRe
 	g := genkit.Init(ctx)
 	flow := genkit.DefineFlow(g, "ingestTest", func(ctx context.Context, _ string) (ingestResult, error) {
 		var res ingestResult
-		n, d, err := IndexSource(ctx, store, src, 200, 20, func(s string) { res.Progress = append(res.Progress, s) })
+		n, d, err := IndexSource(ctx, store, src, 200, 20, ProgressMessages(func(s string) { res.Progress = append(res.Progress, s) }, GermanProgress))
 		res.Indexed, res.Deleted = n, d
 		return res, err
 	})
@@ -154,13 +154,13 @@ func TestReindexCrawlData(t *testing.T) {
 			return 0, errors.New("index failed")
 		}
 		got[u] = len(paras)
-		return 1, nil
-	}, func(s string) { lines = append(lines, s) })
+		return 4, nil
+	}, ProgressMessages(func(s string) { lines = append(lines, s) }, GermanProgress))
 	if err != nil {
 		t.Fatalf("ReindexCrawlData: %v", err)
 	}
-	if res.FilesProcessed != 3 || res.PagesIndexed != 1 || len(res.Errors) != 2 {
-		t.Errorf("result = %+v, want 3 files, 1 page, 2 errors", res)
+	if res.FilesProcessed != 3 || res.PagesIndexed != 1 || res.ChunksIndexed != 4 || len(res.Errors) != 2 {
+		t.Errorf("result = %+v, want 3 files, 1 page, 4 chunks, 2 errors", res)
 	}
 	if got["https://a.example/"] != 2 {
 		t.Errorf("a.example paras = %d, want 2", got["https://a.example/"])

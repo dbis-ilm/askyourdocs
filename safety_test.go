@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 import (
 	"strings"
@@ -119,7 +119,7 @@ func TestSanitizeAnswerBareURLs(t *testing.T) {
 	if strings.Contains(got, "evil.example") {
 		t.Errorf("disallowed URL survived: %q", got)
 	}
-	if !strings.Contains(got, linkRemoved+", fertig.") {
+	if !strings.Contains(got, GermanLinkRemoved+", fertig.") {
 		t.Errorf("trailing punctuation should be kept after the marker: %q", got)
 	}
 }
@@ -153,8 +153,8 @@ func TestSanitizeAnswerEmptyAllowlistRemovesAllLinks(t *testing.T) {
 }
 
 func TestSanitizeAnswerLinkWithoutTextGetsMarker(t *testing.T) {
-	if got := SanitizeAnswer("[](https://evil.example)", nil); got != linkRemoved {
-		t.Errorf("got %q, want %q", got, linkRemoved)
+	if got := SanitizeAnswer("[](https://evil.example)", nil); got != GermanLinkRemoved {
+		t.Errorf("got %q, want %q", got, GermanLinkRemoved)
 	}
 }
 
@@ -202,5 +202,12 @@ func TestWrapUntrustedRejectsBadTagNames(t *testing.T) {
 			}()
 			WrapUntrusted(tag, "x")
 		}()
+	}
+}
+
+func TestSanitizeAnswerWithUsesGivenMarker(t *testing.T) {
+	got := SanitizeAnswerWith("See https://evil.example/x. Also [](https://evil.example).", nil, "[link removed]")
+	if want := "See [link removed]. Also [link removed]."; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

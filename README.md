@@ -44,11 +44,11 @@ provider.go   — Providers, GenerateConfig: resolve "ollama/…", "gpustack/…
 logging.go    — SetupLogging, LogConfigFromEnv: log level, log file, JSON, off
 jobs.go       — JobStore: in-memory async job queue with progress, one background worker
 feedback.go   — FeedbackStore[E]: JSON-file log of Q&A interactions plus thumbs up/down ratings
-safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswer: prompt-injection hardening
+safety.go     — SanitizeUntrusted, WrapContext, SanitizeAnswerWith: prompt-injection hardening
 evalhttp.go   — EvalJobHandler, EvalDatasetHandler, RestrictEvalPaths: HTTP contract for remote dataset fetching
 cmd/evalset/  — the evalset command
 injection.go  — DetectInjection, InjectionAttacks/Payloads/EvalCases: detection and eval material
-conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, ConfidenceLabel
+conversation.go — multi-turn helpers: CondenseFollowUp, TrimHistory, BestExcerpt, RateConfidence
 id.go         — NewRandomHexID
 ```
 
@@ -95,7 +95,7 @@ type IngestSource interface {
 	Name() string
 }
 
-func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunkSize, chunkOverlap int, sendChunk func(string)) (indexed, deleted int, err error)
+func IndexSource(ctx context.Context, store VectorStore, src IngestSource, chunkSize, chunkOverlap int, progress ProgressFunc) (indexed, deleted int, err error)
 ```
 
 `VectorStore` is deliberately the *write* side only — four methods. An app
@@ -175,8 +175,8 @@ type CrawlInput struct { SeedURLs []string; MaxPages, MaxDepth, DelayMs int }
 type CrawlResult struct { PagesVisited, PagesSaved, PagesIndexed int; Errors []string }
 type ReindexResult struct { FilesProcessed, PagesIndexed int; Errors []string }
 
-func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress func(string)) (CrawlResult, error)
-func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress func(string)) (ReindexResult, error)
+func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc) (CrawlResult, error)
+func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress ProgressFunc) (ReindexResult, error)
 ```
 
 `RunCrawl` does a breadth-first crawl from `cfg.SeedURLs` (same-host/path-prefix only), strips paragraphs that repeat across pages (boilerplate: nav, footers, repeated cards) before indexing, and — with `SAVE_CRAWL_DATA=1` in the environment — caches each cleaned page as Markdown under `outputDir`. `ReindexCrawlData` replays that cache through `indexPage` without re-fetching anything, for when a chunking fix or a changed chunk size should reach an already-crawled site. Carries no app-specific metadata itself — like `IndexSource`, that's entirely the `IndexPageFunc` closure's job.
@@ -202,6 +202,19 @@ func DefineProgressFlow[In, Out any](g *genkit.Genkit, name string, fn func(ctx 
 
 Every ingest/crawl flow (`indexPDFDocument`, `crawlWeb`, `reindexAllDocuments`, ...) is a Genkit streaming flow only so an HTTP layer can run it as a background job and surface progress messages as it goes — that wrapping (`core.StreamCallback[string]`, calling it as `sendChunk(ctx, msg)`) is identical across every one of them. `DefineProgressFlow` does that wrapping once: write `fn` against a plain `progress func(string)` and get a `*core.Flow[In, Out, string]` back, usable exactly like any other Genkit flow (`.Run` for a synchronous caller that discards the stream, `.Stream` for incremental progress). This is *not* the right shape for a flow that streams its actual output rather than progress-on-the-way-to-a-result — e.g. an answer flow streaming response text — those still call `genkit.DefineStreamingFlow` directly.
 
+### Progress events
+
+`IndexSource`, `RunCrawl` and `ReindexCrawlData` report progress as structured `Progress` events (`Stage`, `Done`, `Total`, plus `URL`/`Depth`/`File` where they apply), not as text. Wording a status line for a user, in whatever language, is app-side like all other user-facing text. For the common case of a flow or job that streams text, `ProgressMessages` adapts a `func(string)` with a formatter, and `GermanProgress` words the events as the German lines these functions used to send themselves:
+
+```go
+type Progress struct { Stage ProgressStage; Done, Total, Depth int; URL, File string }
+type ProgressFunc func(Progress)
+func ProgressMessages(send func(string), format func(Progress) string) ProgressFunc
+func GermanProgress(p Progress) string
+```
+
+`CrawlResult`/`ReindexResult` count pages in `PagesIndexed` and the chunks those pages produced in `ChunksIndexed`.
+
 ### App building blocks: jobs, feedback, multi-turn, embeddings
 
 Small pieces every QA app ends up needing, none tied to a particular document domain:
@@ -209,7 +222,7 @@ Small pieces every QA app ends up needing, none tied to a particular document do
 - **`JobStore`** — runs work one job at a time on a single background worker (so an index and a crawl never compete for the same embedding backend), tracks status/progress/result in memory, and caps its history. `RunStreamingFlowAsJob` drains a flow made with `DefineProgressFlow` into a job's progress and result. Enqueue with the app's long-lived context, not an HTTP request's.
 - **`FeedbackStore[E]`** — appends question/answer entries to a JSON file and rates them later. `E` is the app's own entry type (its own citation shape and extra fields); pass `NewFeedbackStore` functions to read an entry's ID and set its rating. Logging every interaction turns real usage into an eval dataset.
 - **`CondenseFollowUp`** (with `QATurn`, `TrimHistory`, `FormatHistory`, `IsReliableCondense`, `FallbackStandaloneQuestion`) — rewrites a follow-up into a standalone question via an app-supplied prompt taking `{history, question}`, and rejects rewrites that invent or drop numbers present in the conversation. `FormatHistory` labels turns in German ("Nutzer"/"Assistent").
-- **`BestExcerpt`, `ConfidenceLabel`** — a short verbatim quote per citation, and a coarse German "hoch"/"mittel"/"niedrig" label from a reranker's 0–10 top score.
+- **`BestExcerpt`, `RateConfidence`** — a short verbatim quote per citation, and a coarse `high`/`medium`/`low` `Confidence` (`GermanConfidence` words it as "hoch"/"mittel"/"niedrig"; the deprecated `ConfidenceLabel` does both in one call) from a reranker's 0–10 top score.
 - **`NewPrefixEmbedder` / `QueryDocument`** — prepend the query/passage instruction prefixes asymmetric embedding models expect (mxbai-embed-large, nomic-embed-text, e5). Models it doesn't know are left unwrapped. Build search-query documents with `QueryDocument`; HyDE text stays a plain document.
 
 ### Model providers: Ollama, GPUStack, Google AI
@@ -221,17 +234,17 @@ Every app resolves the same kind of settings (`LLM_MODEL`, `RERANK_MODEL`, `EMBE
 - `googleai/gemini-2.5-flash` — Gemini; the key comes from `GEMINI_API_KEY`.
 
 ```go
-cfg, err := engine.ProviderConfigFromEnv() // OLLAMA_HOST, GPUSTACK_URL/_API_KEY, LLM_TIMEOUT
-p, err := engine.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
+cfg, err := askyourdocs.ProviderConfigFromEnv() // OLLAMA_HOST, GPUSTACK_URL/_API_KEY, LLM_TIMEOUT
+p, err := askyourdocs.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
 genk := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
 llm, err := p.Model(genk, llmSpec)
 emb, err := p.Embedder(genk, embeddingSpec, 1024) // already wrapped with NewPrefixEmbedder
 
-opts, err := engine.GenerateOptionsFromEnv() // OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_THINK
-modelConfig := engine.GenerateConfig(llmSpec, opts)
+opts, err := askyourdocs.GenerateOptionsFromEnv() // OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_THINK
+modelConfig := askyourdocs.GenerateConfig(llmSpec, opts)
 ```
 
-`NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{engine.ProviderOllama, engine.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
+`NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{askyourdocs.ProviderOllama, askyourdocs.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
 
 `GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; `max_tokens` and `chat_template_kwargs.enable_thinking` for GPUStack (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
 
@@ -242,7 +255,7 @@ The library reads no environment on its own; `ProviderConfigFromEnv`/`GenerateOp
 The library logs through `log/slog` with levels; it never configures logging itself. An app calls `SetupLogging` first thing in `main`, before `genkit.Init`:
 
 ```go
-closer, err := engine.SetupLogging(engine.LogConfigFromEnv()) // LOG_LEVEL, LOG_FILE, LOG_FORMAT
+closer, err := askyourdocs.SetupLogging(askyourdocs.LogConfigFromEnv()) // LOG_LEVEL, LOG_FILE, LOG_FORMAT
 if err != nil {
 	log.Fatal(err)
 }
@@ -267,14 +280,14 @@ A second layer, not a guarantee: a model cannot reliably tell instructions from 
 func SanitizeUntrusted(text string) string
 func WrapContext(context string) string
 func WrapUntrusted(tag, text string) string
-func SanitizeAnswer(answer string, allowedURLs []string) string
+func SanitizeAnswerWith(answer string, allowedURLs []string, linkRemoved string) string
 func AnswerLeaks(answer string, allowedURLs []string) []string
 ```
 
 - **`WrapContext`** — cleans the assembled context with `SanitizeUntrusted` (drops Unicode tag characters, zero-width and bidi-control characters, other control characters: ways to hide instructions from a human reader), defuses any copy of the delimiter in the text so a document can't close the block early, and wraps it in `<context>…</context>` (`ContextOpenTag`/`ContextCloseTag`). The app's system prompt must say that everything between the tags is quoted material and never instructions.
 - **`WrapUntrusted`** — `WrapContext` for any other delimiter: `WrapUntrusted("mail", body)` cleans the text, defuses copies of `<mail>`/`</mail>` in it and wraps it in those tags. `WrapContext` is `WrapUntrusted("context", …)`. The tag must be a plain name (it panics otherwise).
-- **`AnswerLeaks`** — the check side of `SanitizeAnswer`: returns what in an answer shows an attack succeeded (`canary`, `image`, `html`, `link:<url>`, `url:<url>`), empty if nothing. For eval checks on generated answers.
-- **`SanitizeAnswer`** — applied to a model reply: removes Markdown images (rendered automatically, so a URL with data in it leaks without a click) and raw HTML, and drops any link or bare URL that isn't among `allowedURLs` (the answer's own source URLs; a URL counts if it equals an entry or extends it at a path boundary). It needs the *complete* answer: when streaming, don't render images or follow links until the answer is done, then replace what was shown with the sanitized text. The removed-link marker is German (`[Link entfernt]`).
+- **`AnswerLeaks`** — the check side of `SanitizeAnswerWith`: returns what in an answer shows an attack succeeded (`canary`, `image`, `html`, `link:<url>`, `url:<url>`), empty if nothing. For eval checks on generated answers.
+- **`SanitizeAnswerWith`** — applied to a model reply: removes Markdown images (rendered automatically, so a URL with data in it leaks without a click) and raw HTML, and drops any link or bare URL that isn't among `allowedURLs` (the answer's own source URLs; a URL counts if it equals an entry or extends it at a path boundary). It needs the *complete* answer: when streaming, don't render images or follow links until the answer is done, then replace what was shown with the sanitized text. `linkRemoved` replaces a removed URL, in the app's language; `GermanLinkRemoved` is `[Link entfernt]`. The deprecated `SanitizeAnswer` is the same with that German marker.
 
 #### Detection and injection evals
 
@@ -360,11 +373,11 @@ Kinds: `generated` (questions generated from the indexed documents), `feedback` 
 An app takes part by registering three admin routes with the engine's helpers (see `evalhttp.go`):
 
 ```go
-mux.HandleFunc("POST /api/eval/generated", admin(engine.EvalJobHandler(jobs, ctx, "evalGenerated",
+mux.HandleFunc("POST /api/eval/generated", admin(askyourdocs.EvalJobHandler(jobs, ctx, "evalGenerated",
     func(ctx context.Context, in generateEvalSetInput) (any, error) { return generateFlow.Run(ctx, in) },
-    func(in *generateEvalSetInput) error { return engine.RestrictEvalPaths(&in.Dir, &in.OutPath) })))
+    func(in *generateEvalSetInput) error { return askyourdocs.RestrictEvalPaths(&in.Dir, &in.OutPath) })))
 // ... "feedback", "injection" the same way, with RestrictEvalPaths(nil, &in.OutPath)
-mux.HandleFunc("GET /api/eval/datasets/{name}", admin(engine.EvalDatasetHandler("testdata")))
+mux.HandleFunc("GET /api/eval/datasets/{name}", admin(askyourdocs.EvalDatasetHandler("testdata")))
 ```
 
 The routes must sit behind the app's admin check: the first starts LLM work and reads server files, and the `feedback` dataset contains logged user questions. `RestrictEvalPaths` ignores a client-supplied `outPath` (so a client can't make the server write anywhere) and rejects an absolute or `..` `dir`; `EvalDatasetHandler` serves only `eval_dataset_*.json` files.
@@ -410,10 +423,12 @@ go get github.com/dbis-ilm/askyourdocs@latest
 ```
 
 ```go
-import engine "github.com/dbis-ilm/askyourdocs" // alias: package is "engine", path's last segment isn't
+import "github.com/dbis-ilm/askyourdocs"
 ```
 
-which adds a normal `require` line to the consumer's `go.mod`/`go.sum`. Once a tag exists, pin to it the same way: `go get github.com/dbis-ilm/askyourdocs@v0.1.0`.
+The package used to be named `engine`; an app importing it as `engine "github.com/dbis-ilm/askyourdocs"` keeps working with that alias.
+
+The `go get` adds a normal `require` line to the consumer's `go.mod`/`go.sum`. Once a tag exists, pin to it the same way: `go get github.com/dbis-ilm/askyourdocs@v0.1.0`.
 
 If the repo ends up private rather than public, the consumer additionally needs `go env -w GOPRIVATE=github.com/dbis-ilm/askyourdocs` (skips the public checksum database, which can't see a private repo's contents) and whatever git credentials/SSH config already let it `git clone` the repo — `go get` fetches over the same path.
 
@@ -449,7 +464,7 @@ import (
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/localvec"
 
-	askyourdocs "github.com/dbis-ilm/askyourdocs" // alias: package is "engine", path's last segment isn't
+	"github.com/dbis-ilm/askyourdocs"
 )
 
 // urlSource is the IngestSource for one web page — write one of these per
@@ -512,8 +527,8 @@ func main() {
 	// Index one page. chunkSize/chunkOverlap are in characters; the last
 	// argument is an optional progress callback.
 	src := urlSource{url: "https://example.com/about"}
-	indexed, deleted, err := askyourdocs.IndexSource(ctx, store, src, 1200, 150, func(msg string) {
-		log.Println(msg)
+	indexed, deleted, err := askyourdocs.IndexSource(ctx, store, src, 1200, 150, func(p askyourdocs.Progress) {
+		log.Printf("%s %d/%d", p.Stage, p.Done, p.Total)
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -585,7 +600,8 @@ has six more methods than `askyourdocs.VectorStore` needs:
 
 ```go
 func (app *appSetup) indexSource(ctx context.Context, src askyourdocs.IngestSource, progress func(string)) (int, int, error) {
-	return askyourdocs.IndexSource(ctx, app.store, src, app.chunkSize, app.chunkOverlap, progress)
+	return askyourdocs.IndexSource(ctx, app.store, src, app.chunkSize, app.chunkOverlap,
+		askyourdocs.ProgressMessages(progress, askyourdocs.GermanProgress))
 }
 ```
 

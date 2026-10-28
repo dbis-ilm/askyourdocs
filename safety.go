@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 import (
 	"regexp"
@@ -106,10 +106,11 @@ var (
 	answerHTMLRE = regexp.MustCompile(`<!--.*?-->|</?[a-zA-Z][^>]*>`)
 )
 
-// linkRemoved replaces a URL that is not on the allowlist.
-const linkRemoved = "[Link entfernt]"
+// GermanLinkRemoved is the marker SanitizeAnswer puts in place of a removed
+// URL, for apps that keep showing it with SanitizeAnswerWith.
+const GermanLinkRemoved = "[Link entfernt]"
 
-// SanitizeAnswer removes the parts of a model reply that could exfiltrate
+// SanitizeAnswerWith removes the parts of a model reply that could exfiltrate
 // data or be rendered as active content, once the model has been talked
 // into doing so: Markdown images (fetched automatically by most renderers,
 // so a URL with data in it leaks without a click), raw HTML tags, and links
@@ -119,14 +120,15 @@ const linkRemoved = "[Link entfernt]"
 // allowedURLs are the sources of the answer (the apps' citation URLs). A URL
 // counts as allowed if it equals an entry or extends one at a path boundary
 // ("https://a.org/x" allows "https://a.org/x/y" but not "https://a.org/xy").
-// With an empty allowlist every link is removed. The removed marker is
-// German ("[Link entfernt]"), like the rest of the apps' output.
+// With an empty allowlist every link is removed. linkRemoved replaces a
+// removed bare URL and a removed link without text, in the answer's
+// language; GermanLinkRemoved is "[Link entfernt]".
 //
 // This works on a complete answer. A streamed reply can leak through a
 // Markdown image before the closing parenthesis arrives, so streaming
 // clients must not render images or follow links until the answer is done,
 // and should replace what they displayed with the sanitized final text.
-func SanitizeAnswer(answer string, allowedURLs []string) string {
+func SanitizeAnswerWith(answer string, allowedURLs []string, linkRemoved string) string {
 	answer = SanitizeUntrusted(answer)
 	answer = answerHTMLRE.ReplaceAllString(answer, "")
 	answer = answerImageRE.ReplaceAllString(answer, "$1")
@@ -149,6 +151,14 @@ func SanitizeAnswer(answer string, allowedURLs []string) string {
 		}
 		return linkRemoved + tail
 	})
+}
+
+// SanitizeAnswer is SanitizeAnswerWith(answer, allowedURLs, GermanLinkRemoved).
+//
+// Deprecated: Use SanitizeAnswerWith with a marker in the app's language,
+// or GermanLinkRemoved to keep the German one.
+func SanitizeAnswer(answer string, allowedURLs []string) string {
+	return SanitizeAnswerWith(answer, allowedURLs, GermanLinkRemoved)
 }
 
 // urlAllowed reports whether u equals an allowed URL or extends one at a

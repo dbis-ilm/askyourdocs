@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package engine
+package askyourdocs
 
 import (
 	"context"
@@ -302,5 +302,32 @@ func TestIsReliableCondenseUnchangedQuestionPasses(t *testing.T) {
 	hist := []QATurn{{Question: "Wie hoch sind die Gebühren?", Answer: "Circa 300 € pro Semester."}}
 	if !IsReliableCondense("Welche Masterprogramme gibt es?", "Welche Masterprogramme gibt es?", hist) {
 		t.Error("an unchanged standalone question must not be rejected because the history contains numbers")
+	}
+}
+
+func TestRateConfidenceAndGermanConfidence(t *testing.T) {
+	for _, c := range []struct {
+		top      int
+		fallback bool
+		want     Confidence
+		german   string
+	}{
+		{9, false, ConfidenceHigh, "hoch"},
+		{8, false, ConfidenceHigh, "hoch"},
+		{7, false, ConfidenceMedium, "mittel"},
+		{5, false, ConfidenceMedium, "mittel"},
+		{4, false, ConfidenceLow, "niedrig"},
+		{9, true, ConfidenceLow, "niedrig"},
+	} {
+		got := RateConfidence(c.top, c.fallback)
+		if got != c.want {
+			t.Errorf("RateConfidence(%d, %v) = %q, want %q", c.top, c.fallback, got, c.want)
+		}
+		if g := GermanConfidence(got); g != c.german {
+			t.Errorf("GermanConfidence(%q) = %q, want %q", got, g, c.german)
+		}
+	}
+	if GermanConfidence("unknown") != "" {
+		t.Error(`GermanConfidence("unknown") != ""`)
 	}
 }
