@@ -169,3 +169,24 @@ func TestKeywordSearchSQLStopsOnCanceledContext(t *testing.T) {
 		t.Fatalf("KeywordSearchSQL error = %v, want context.Canceled", err)
 	}
 }
+
+func TestNewPgvecStoreRejectsInvalidSourceMetaKeysBeforeConnecting(t *testing.T) {
+	_, err := NewPgvecStore(context.Background(), nil, "test", &recordingEmbedder{}, "postgres://unused", 3,
+		WithSourceMetaKeys("tag", "x'; --"))
+	if err == nil || !strings.Contains(err.Error(), "source metadata key") {
+		t.Fatalf("NewPgvecStore error = %v, want invalid source metadata key", err)
+	}
+}
+
+func TestSourceWhere(t *testing.T) {
+	s := &PgvecStore{sourceMetaKeys: []string{"tag", "datum"}}
+	where, args := s.sourceWhere(Source{Source: "a.pdf", Metadata: map[string]string{"tag": "Senat"}}, 3)
+	wantWhere := "COALESCE(metadata->>'url', '') = $3 AND metadata->>'source' = $4 AND " +
+		"metadata->>'tag' = $5 AND COALESCE(metadata->>'datum', '') = $6"
+	if where != wantWhere {
+		t.Errorf("where = %s\nwant    %s", where, wantWhere)
+	}
+	if want := []any{"", "a.pdf", "Senat", ""}; !reflect.DeepEqual(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
