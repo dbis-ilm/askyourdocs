@@ -19,6 +19,7 @@ package askyourdocs
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -78,6 +79,41 @@ func DetectInjection(text string) []string {
 		found = append(found, "hidden-characters")
 	}
 	return found
+}
+
+// WarnOnInjection logs a warning for every chunk of source that
+// DetectInjection flags, with the matched rules and the start of the chunk,
+// and returns how many it flagged. It is meant for indexing time: the
+// chunks are indexed anyway — the heuristics have false positives, and the
+// prompts treat retrieved text as untrusted regardless — but an operator
+// gets to see where a planted instruction might sit.
+func WarnOnInjection(source string, chunks []Chunk) int {
+	flagged := 0
+	for _, c := range chunks {
+		rules := DetectInjection(c.Text)
+		if len(rules) == 0 {
+			continue
+		}
+		flagged++
+		slog.Warn("suspicious chunk indexed", "source", source, "rules", strings.Join(rules, ", "),
+			"preview", injectionPreview(c.Text))
+	}
+	return flagged
+}
+
+// injectionPreviewChars is how many characters of a flagged chunk
+// WarnOnInjection logs.
+const injectionPreviewChars = 120
+
+// injectionPreview collapses text's whitespace and cuts it to
+// injectionPreviewChars characters (not bytes, so a multi-byte character is
+// never split).
+func injectionPreview(text string) string {
+	preview := strings.Join(strings.Fields(text), " ")
+	if r := []rune(preview); len(r) > injectionPreviewChars {
+		preview = string(r[:injectionPreviewChars]) + "…"
+	}
+	return preview
 }
 
 // hasHiddenCharacters reports whether text contains invisible characters

@@ -488,3 +488,23 @@ func TestBuildRowTextUniformLargeGapsAlwaysSpace(t *testing.T) {
 		t.Errorf("buildRowText = %q, want %q", got, want)
 	}
 }
+
+func TestHasTextLayer(t *testing.T) {
+	page := func(n int, text string) Paragraph { return Paragraph{Text: text, PageNum: n} }
+	long := strings.Repeat("Beschluss des Senats. ", 10)
+	for name, tc := range map[string]struct {
+		paras []Paragraph
+		want  bool
+	}{
+		"nothing":               {nil, false},
+		"whitespace only":       {[]Paragraph{page(1, " \n\t ")}, false},
+		"scan with stamp":       {[]Paragraph{page(1, "Seite 1"), page(12, "Seite 12")}, false},
+		"text pages":            {[]Paragraph{page(1, long), page(2, long)}, true},
+		"short one-pager":       {[]Paragraph{page(1, "Antrag angenommen.")}, false},
+		"docx without page nos": {[]Paragraph{{Text: "Kurz."}}, true},
+	} {
+		if got := HasTextLayer(tc.paras); got != tc.want {
+			t.Errorf("%s: HasTextLayer = %v, want %v", name, got, tc.want)
+		}
+	}
+}
