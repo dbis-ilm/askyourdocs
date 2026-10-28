@@ -459,7 +459,29 @@ func TestProvidersGoogleAI(t *testing.T) {
 	if len(er.Embeddings) != 1 {
 		t.Fatalf("got %d embeddings, want 1", len(er.Embeddings))
 	}
-	if path, _ := srv.last(); !strings.HasSuffix(path, "/models/gemini-embedding-001:batchEmbedContents") {
+	path, body := srv.last()
+	if !strings.HasSuffix(path, "/models/gemini-embedding-001:batchEmbedContents") {
 		t.Errorf("embed request went to %s", path)
+	}
+	// The store's dimension must reach the API, or it answers with the
+	// model's default size and the vectors don't fit the store.
+	reqs, _ := body["requests"].([]any)
+	if len(reqs) != 1 {
+		t.Fatalf("embed body = %v, want one request", body)
+	}
+	if got := reqs[0].(map[string]any)["outputDimensionality"]; got != float64(768) {
+		t.Errorf("outputDimensionality = %v, want 768", got)
+	}
+
+	// Options the caller set win.
+	if _, err := emb.Embed(ctx, &ai.EmbedRequest{
+		Input:   []*ai.Document{ai.DocumentFromText("Mensa", nil)},
+		Options: map[string]any{"outputDimensionality": 256},
+	}); err != nil {
+		t.Fatalf("Embed with options: %v", err)
+	}
+	_, body = srv.last()
+	if got := body["requests"].([]any)[0].(map[string]any)["outputDimensionality"]; got != float64(256) {
+		t.Errorf("caller's outputDimensionality = %v, want 256", got)
 	}
 }

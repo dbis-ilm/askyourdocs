@@ -17,6 +17,7 @@
 package askyourdocs
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -276,7 +277,9 @@ func (p *Providers) Embedder(g *genkit.Genkit, spec string, dim int) (ai.Embedde
 		genkit.RegisterAction(g, action)
 		e = action
 	case provider == ProviderGoogleAI && p.googleAI != nil:
-		e = genkit.LookupEmbedder(g, api.NewName(ProviderGoogleAI, name))
+		if e = genkit.LookupEmbedder(g, api.NewName(ProviderGoogleAI, name)); e != nil {
+			e = &outputDimEmbedder{Embedder: e, dim: dim}
+		}
 	default:
 		return nil, fmt.Errorf("embedder spec %q was not passed to NewProviders", spec)
 	}
@@ -350,6 +353,26 @@ func GenerateConfig(spec string, o GenerateOptions) any {
 		return &GPUStackConfig{MaxOutputTokens: o.MaxTokens, EnableThinking: &think}
 	}
 	return nil
+}
+
+// outputDimEmbedder asks a Google AI embedder for dim-sized vectors. The
+// API returns the model's default size (3072 for gemini-embedding-001)
+// unless the request sets outputDimensionality; the plugin's
+// EmbedderOptions.Dimensions only describes the embedder and isn't sent.
+// A request that already carries options is passed on unchanged.
+type outputDimEmbedder struct {
+	ai.Embedder
+	dim int
+}
+
+func (e *outputDimEmbedder) Embed(ctx context.Context, req *ai.EmbedRequest) (*ai.EmbedResponse, error) {
+	if req != nil && req.Options == nil {
+		next := *req
+		// The plugin converts the map into its genai.EmbedContentConfig.
+		next.Options = map[string]any{"outputDimensionality": e.dim}
+		req = &next
+	}
+	return e.Embedder.Embed(ctx, req)
 }
 
 // GPUStackConfig is the request config of a GPUStack chat model, what
