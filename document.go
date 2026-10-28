@@ -78,6 +78,30 @@ func SupportedDocumentExt(ext string) bool {
 	}
 }
 
+// minCharsPerPage is the average amount of non-space text per page below
+// which HasTextLayer takes a PDF for a scan: a scanned page yields nothing
+// or only stray characters (page numbers, a stamp), a text page hundreds.
+const minCharsPerPage = 20
+
+// HasTextLayer reports whether paras, as ExtractParagraphs returned them,
+// hold real text rather than what a scanned PDF without a text layer
+// yields — nothing, or a few characters per page. Such a file needs OCR
+// before it can be indexed; telling the user so beats indexing an empty
+// document. Paragraphs without page numbers (.docx, Markdown) only fail
+// when they hold no text at all.
+func HasTextLayer(paras []Paragraph) bool {
+	chars, pages := 0, 0
+	for _, p := range paras {
+		for _, r := range p.Text {
+			if !unicode.IsSpace(r) {
+				chars++
+			}
+		}
+		pages = max(pages, p.PageNum)
+	}
+	return chars > 0 && chars >= minCharsPerPage*pages
+}
+
 // ExtractParagraphs reads path and returns its paragraphs, dispatching on
 // file extension. ".pdf" and ".docx" are the only supported types — anything
 // else is an explicit error rather than a silent misparse.

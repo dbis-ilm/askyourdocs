@@ -18,7 +18,6 @@ package askyourdocs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -88,42 +87,25 @@ func RestrictEvalPaths(dir, outPath *string) error {
 // EvalJobHandler returns a handler for POST /api/eval/{kind}: it decodes
 // {"data": In}, lets restrict adjust or reject the input (typically via
 // RestrictEvalPaths; nil means no check), and runs the flow as a background
-// job, answering 202 {"jobId": ...}. kind is the job's kind label. run
+// job, answering 202 {"jobId": ...}. Bad input and a body over 1 MiB get
+// 400, a full queue 503. kind is the job's kind label. run
 // executes the flow, e.g. func(ctx, in) (any, error) { return flow.Run(ctx,
 // in) }. ctx must be the app's long-lived context, not the request's.
 func EvalJobHandler[In any](jobs *JobStore, ctx context.Context, kind string, run func(ctx context.Context, in In) (any, error), restrict func(*In) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Data In `json:"data"`
-		}
-		if r.Body != nil && r.ContentLength != 0 {
-			defer r.Body.Close()
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				writeEvalJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-				return
-			}
-		}
-		if restrict != nil {
-			if err := restrict(&body.Data); err != nil {
-				writeEvalJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-		}
-
-		j, err := jobs.Enqueue(kind, func(progress func(string)) (any, error) {
-			progress("running")
-			return run(ctx, body.Data)
-		})
-		if err != nil {
-			writeEvalJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		in, ok := decodeJobInput[In](w, r)
+		if !ok {
 			return
 		}
-		writeEvalJSON(w, http.StatusAccepted, map[string]string{"jobId": j.ID})
+		if restrict != nil {
+			if err := restrict(&in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		enqueueJob(w, jobs, kind, func(progress func(string)) (any, error) {
+			progress("running")
+			return run(ctx, in)
+		})
 	}
-}
-
-func writeEvalJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
 }
