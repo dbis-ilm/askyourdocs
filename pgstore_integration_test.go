@@ -28,6 +28,7 @@ package askyourdocs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -627,5 +628,109 @@ func TestIntegrationPgvecRetrieverOptions(t *testing.T) {
 	type otherOptions struct{ K int }
 	if _, err := s.Retriever.Retrieve(ctx, &ai.RetrieverRequest{Query: query, Options: otherOptions{K: 1}}); err == nil {
 		t.Error("Retrieve with a foreign options type: got nil error")
+	}
+}
+
+func TestIntegrationPgvecSourceAdministration(t *testing.T) {
+	dsn := integrationDSN(t)
+	resetDB(t, dsn)
+	ctx := context.Background()
+	s, err := openStore(t, dsn, 3, WithSourceMetaKeys("tag", "datum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := []*ai.Document{
+		ai.DocumentFromText("eins", map[string]any{"source": "a.pdf", "tag": "Senat", "datum": "2026-01-13", "page": "1"}),
+		ai.DocumentFromText("zwei", map[string]any{"source": "a.pdf", "tag": "Senat", "datum": "2026-01-13"}),
+		ai.DocumentFromText("drei", map[string]any{"source": "a.pdf", "tag": "Ordnung"}),
+		ai.DocumentFromText("vier", map[string]any{"source": "a.pdf", "tag": ""}), // same group as no tag at all
+		ai.DocumentFromText("fünf", map[string]any{"source": "a.pdf"}),
+		ai.DocumentFromText("sechs", map[string]any{"url": "https://b.example/"}),
+		ai.DocumentFromText("sieben", map[string]any{"page": "9"}), // nothing to group by
+	}
+	if err := s.Index(ctx, docs); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Sources(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sortSources(got)
+	want := []Source{
+		{Source: "a.pdf", Chunks: 2},
+		{Source: "a.pdf", Metadata: map[string]string{"tag": "Ordnung"}, Chunks: 1},
+		{Source: "a.pdf", Metadata: map[string]string{"tag": "Senat", "datum": "2026-01-13"}, Chunks: 2},
+		{URL: "https://b.example/", Chunks: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Sources = %+v\nwant %+v", got, want)
+	}
+
+	senat := want[2]
+	n, err := s.UpdateMetadata(ctx, senat, map[string]string{"tag": "Ordnung", "other": "ignored"})
+	if err != nil || n != 2 {
+		t.Fatalf("UpdateMetadata = %d, %v; want 2, nil", n, err)
+	}
+	var meta string
+	if err := s.Pool.QueryRow(ctx, `SELECT metadata::text FROM documents WHERE content = 'eins'`).Scan(&meta); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	_ = json.Unmarshal([]byte(meta), &m)
+	if wantMeta := map[string]any{"source": "a.pdf", "tag": "Ordnung", "page": "1"}; !reflect.DeepEqual(m, wantMeta) {
+		t.Errorf("metadata after update = %v, want %v", m, wantMeta)
+	}
+
+	ordnung := Source{Source: "a.pdf", Metadata: map[string]string{"tag": "Ordnung"}}
+	if n, err := s.DeleteSource(ctx, ordnung); err != nil || n != 3 {
+		t.Fatalf("DeleteSource = %d, %v; want 3, nil", n, err)
+	}
+	if n, err := s.DeleteSource(ctx, Source{Source: "a.pdf"}); err != nil || n != 2 {
+		t.Fatalf("DeleteSource untagged = %d, %v; want 2, nil", n, err)
+	}
+	if got := countDocs(t, s.Pool); got != 2 {
+		t.Errorf("%d documents left, want 2", got)
+	}
+
+	if err := s.Reset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := countDocs(t, s.Pool); got != 0 {
+		t.Errorf("%d documents after Reset, want 0", got)
+	}
+}
+
+func TestIntegrationPgvecRetrieveWhere(t *testing.T) {
+	dsn := integrationDSN(t)
+	resetDB(t, dsn)
+	ctx := context.Background()
+	s, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var docs []*ai.Document
+	for i, tag := range []string{"a", "b", "b", "b", "a"} {
+		docs = append(docs, ai.DocumentFromText(fmt.Sprintf("doc %d", i), map[string]any{"tag": tag}))
+	}
+	if err := s.Index(ctx, docs); err != nil {
+		t.Fatal(err)
+	}
+
+	// $3 is the first free placeholder, as in KeywordSearch.
+	got, err := s.RetrieveWhere(ctx, ai.DocumentFromText("doc", nil), 5, "metadata->>'tag' = $3", []any{"a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("RetrieveWhere = %d docs, want 2", len(got))
+	}
+	for _, d := range got {
+		if d.Metadata["tag"] != "a" {
+			t.Errorf("RetrieveWhere returned tag %v", d.Metadata["tag"])
+		}
+	}
+	if got, err := s.Retrieve(ctx, ai.DocumentFromText("doc", nil), 3); err != nil || len(got) != 3 {
+		t.Errorf("Retrieve = %d docs, %v; want 3", len(got), err)
 	}
 }

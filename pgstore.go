@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/firebase/genkit/go/ai"
@@ -35,11 +36,12 @@ import (
 // PgvecStore is a ready-made VectorStore backed by PostgreSQL + pgvector —
 // an alternative to LocalvecStore for an app that wants a real database
 // (concurrent access, SQL-side filtering, keyword search) instead of a
-// single file. Pool and Embedder are exported so an app needing more than
-// the plain, unfiltered Retrieve below (e.g. filtered retrieval, keyword
-// search, source administration) can run its own queries against the same
-// connection and embedder — see the ask-the-records app's pgvecStore, which embeds this
-// type and adds exactly that.
+// single file. RetrieveWhere and KeywordSearch take the app's filter as a
+// SQL condition, and Sources, UpdateMetadata, DeleteSource and Reset
+// administer what is indexed. Pool and Embedder are exported so an app
+// needing more can run its own queries against the same connection and
+// embedder — see the ask-the-records app's pgvecStore, which embeds this
+// type.
 type PgvecStore struct {
 	Pool      *pgxpool.Pool
 	Embedder  ai.Embedder
@@ -49,6 +51,8 @@ type PgvecStore struct {
 	// the tsv column is built from (see WithTextSearchLanguages).
 	// KeywordSearch queries with all of them.
 	TextSearchLanguages []string
+
+	sourceMetaKeys []string
 }
 
 // DefaultTextSearchLanguages are the text-search configurations
@@ -65,8 +69,9 @@ var ErrEmbeddingDimMismatch = errors.New("embedding dimension mismatch")
 type PgvecOption func(*pgvecConfig)
 
 type pgvecConfig struct {
-	languages   []string
-	resetOnDims bool
+	languages      []string
+	resetOnDims    bool
+	sourceMetaKeys []string
 }
 
 // WithTextSearchLanguages sets the Postgres text-search configurations
@@ -88,6 +93,17 @@ func WithTextSearchLanguages(langs ...string) PgvecOption {
 // unless the table is empty, which is always migrated.
 func WithResetOnDimensionMismatch() PgvecOption {
 	return func(c *pgvecConfig) { c.resetOnDims = true }
+}
+
+// WithSourceMetaKeys names the chunk metadata fields that, besides url and
+// source, tell indexed documents apart in Sources, UpdateMetadata and
+// DeleteSource — e.g. "tag", "datum": a file whose chunks carry two
+// different tags is listed as two sources. Which fields these are is up to
+// the app; each must be a plain name (letters, digits, underscore) other
+// than url, source and chunks. Without this option a source is url and
+// source alone.
+func WithSourceMetaKeys(keys ...string) PgvecOption {
+	return func(c *pgvecConfig) { c.sourceMetaKeys = keys }
 }
 
 // textSearchConfigName matches a plain, unqualified Postgres identifier —
@@ -165,6 +181,9 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 	if err != nil {
 		return nil, err
 	}
+	if err := checkSourceMetaKeys(cfg.sourceMetaKeys); err != nil {
+		return nil, err
+	}
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -176,7 +195,7 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 		return nil, fmt.Errorf("pgvector ping: %w", err)
 	}
 
-	s := &PgvecStore{Pool: pool, Embedder: emb, TextSearchLanguages: langs}
+	s := &PgvecStore{Pool: pool, Embedder: emb, TextSearchLanguages: langs, sourceMetaKeys: cfg.sourceMetaKeys}
 
 	if err := s.ensureSchema(ctx, embeddingDim, cfg.resetOnDims); err != nil {
 		pool.Close()
@@ -431,10 +450,20 @@ func (s *PgvecStore) retrieve(ctx context.Context, req *ai.RetrieverRequest, opt
 	return &ai.RetrieverResponse{Documents: docs}, nil
 }
 
-// Retrieve runs a plain vector similarity search with no filtering — an app
-// needing SQL-side filtering (date ranges, tags, ...) builds that itself
-// against Pool/Embedder instead (see the ask-the-records app's filtered Retrieve).
+// Retrieve runs a plain vector similarity search with no filtering.
 func (s *PgvecStore) Retrieve(ctx context.Context, query *ai.Document, k int) ([]*ai.Document, error) {
+	return s.RetrieveWhere(ctx, query, k, "", nil)
+}
+
+// RetrieveWhere runs a vector similarity search restricted by extraWhere, a
+// SQL condition on the documents table (e.g. "metadata->>'tag' = ANY($3)")
+// with extraArgs as its arguments. It narrows what the index ranks, so it
+// returns up to k matching documents however rare they are. The query binds
+// the query vector as $1 and k as $2, so extraWhere's placeholders start at
+// $3 — the same numbering as KeywordSearch, so one filter rendering serves
+// both. Pass "", nil for no filter. extraWhere is SQL text: build it from
+// fixed strings and pass user input only through extraArgs.
+func (s *PgvecStore) RetrieveWhere(ctx context.Context, query *ai.Document, k int, extraWhere string, extraArgs []any) ([]*ai.Document, error) {
 	if query == nil {
 		return nil, fmt.Errorf("retrieve: query document is nil")
 	}
@@ -449,13 +478,19 @@ func (s *PgvecStore) Retrieve(ctx context.Context, query *ai.Document, k int) ([
 	}
 	qvec := pgvector.NewVector(embedResp.Embeddings[0].Embedding)
 
-	const q = `
+	where := ""
+	if extraWhere != "" {
+		where = "WHERE " + extraWhere
+	}
+	q := `
 SELECT content, metadata, parent_text
 FROM documents
+` + where + `
 ORDER BY embedding <=> $1
 LIMIT $2`
 
-	rows, err := s.Pool.Query(ctx, q, qvec, k)
+	args := append([]any{qvec, k}, extraArgs...)
+	rows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
@@ -514,15 +549,25 @@ func (s *PgvecStore) Close() error {
 	return nil
 }
 
-// Sources returns aggregated source metadata across all stored documents,
-// grouped by (url, source) alone.
+// Sources returns one entry per indexed document, grouped by url, source
+// and the store's source metadata keys (see WithSourceMetaKeys), with its
+// chunk count, most chunks first.
 func (s *PgvecStore) Sources(ctx context.Context) ([]Source, error) {
-	const q = `
-SELECT COALESCE(metadata->>'url', '') AS url, COALESCE(metadata->>'source', '') AS source, COUNT(*) AS chunks
+	keys := s.sourceMetaKeys
+	cols := []string{"COALESCE(metadata->>'url', '')", "COALESCE(metadata->>'source', '')"}
+	for _, k := range keys {
+		// k passed checkSourceMetaKeys: a plain name, safe in SQL text.
+		cols = append(cols, fmt.Sprintf("COALESCE(metadata->>'%s', '')", k))
+	}
+	groupBy := make([]string, len(cols))
+	for i := range cols {
+		groupBy[i] = strconv.Itoa(i + 1)
+	}
+	q := fmt.Sprintf(`
+SELECT %s, COUNT(*) AS chunks
 FROM documents
-WHERE metadata->>'url' IS NOT NULL OR metadata->>'source' IS NOT NULL
-GROUP BY 1, 2
-ORDER BY chunks DESC`
+GROUP BY %s
+ORDER BY chunks DESC`, strings.Join(cols, ", "), strings.Join(groupBy, ", "))
 
 	rows, err := s.Pool.Query(ctx, q)
 	if err != nil {
@@ -531,15 +576,105 @@ ORDER BY chunks DESC`
 	defer rows.Close()
 
 	sources := []Source{}
+	vals := make([]string, len(cols))
 	for rows.Next() {
-		var src Source
-		if err := rows.Scan(&src.URL, &src.Source, &src.Chunks); err != nil {
+		var chunks int
+		dest := make([]any, 0, len(cols)+1)
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		dest = append(dest, &chunks)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
+		meta := make(map[string]any, len(cols))
+		meta["url"], meta["source"] = vals[0], vals[1]
+		for i, k := range keys {
+			meta[k] = vals[i+2]
+		}
+		src, ok := sourceOf(meta, keys)
+		if !ok {
+			continue
+		}
+		src.Chunks = chunks
 		sources = append(sources, src)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
 	return sources, nil
+}
+
+// sourceWhere returns a condition matching exactly the chunks of src, as
+// Sources groups them, with its arguments numbered from $start. A missing
+// field matches "" as well as no value. Non-empty url and source compare
+// the plain expression so the indexes on them apply.
+func (s *PgvecStore) sourceWhere(src Source, start int) (string, []any) {
+	var conds []string
+	var args []any
+	add := func(key, val string) {
+		n := start + len(args)
+		// key is "url", "source" or passed checkSourceMetaKeys.
+		if val == "" {
+			conds = append(conds, fmt.Sprintf("COALESCE(metadata->>'%s', '') = $%d", key, n))
+		} else {
+			conds = append(conds, fmt.Sprintf("metadata->>'%s' = $%d", key, n))
+		}
+		args = append(args, val)
+	}
+	add("url", src.URL)
+	add("source", src.Source)
+	for _, k := range s.sourceMetaKeys {
+		add(k, src.Metadata[k])
+	}
+	return strings.Join(conds, " AND "), args
+}
+
+// UpdateMetadata sets the source metadata keys of every chunk of old
+// (matched like DeleteSource) to newMetadata, in one UPDATE. A key missing
+// or empty in newMetadata is removed from the chunks instead of stored as
+// "", so they look like chunks that never had it. Other metadata is left
+// alone, and keys the store doesn't group by are ignored in newMetadata.
+// Returns how many chunks were updated.
+func (s *PgvecStore) UpdateMetadata(ctx context.Context, old Source, newMetadata map[string]string) (int, error) {
+	set := map[string]string{}
+	strip := ""
+	for _, k := range s.sourceMetaKeys {
+		strip += fmt.Sprintf(" - '%s'", k)
+		if v := newMetadata[k]; v != "" {
+			set[k] = v
+		}
+	}
+	setJSON, err := json.Marshal(set)
+	if err != nil {
+		return 0, fmt.Errorf("marshal metadata: %w", err)
+	}
+	where, args := s.sourceWhere(old, 2)
+	q := fmt.Sprintf(`UPDATE documents SET metadata = (metadata%s) || $1::jsonb WHERE %s`, strip, where)
+	tag, err := s.Pool.Exec(ctx, q, append([]any{setJSON}, args...)...)
+	if err != nil {
+		return 0, fmt.Errorf("update metadata: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// DeleteSource removes exactly the chunks of src, compared on url, source
+// and every key the store groups by — one entry of a Sources listing,
+// without touching chunks of the same file that carry other metadata.
+// Returns how many chunks were deleted.
+func (s *PgvecStore) DeleteSource(ctx context.Context, src Source) (int, error) {
+	where, args := s.sourceWhere(src, 1)
+	tag, err := s.Pool.Exec(ctx, "DELETE FROM documents WHERE "+where, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete source: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// Reset deletes every indexed document.
+func (s *PgvecStore) Reset(ctx context.Context) error {
+	if _, err := s.Pool.Exec(ctx, "TRUNCATE documents RESTART IDENTITY"); err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+	return nil
 }

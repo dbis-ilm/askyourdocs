@@ -118,7 +118,7 @@ Two ready-made `VectorStore` implementations, so a new app doesn't have to
 hand-roll either:
 
 ```go
-func NewLocalvecStore(g *genkit.Genkit, name string, emb ai.Embedder, dir string) (*LocalvecStore, error)
+func NewLocalvecStore(g *genkit.Genkit, name string, emb ai.Embedder, dir string, opts ...LocalvecOption) (*LocalvecStore, error)
 func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int, opts ...PgvecOption) (*PgvecStore, error)
 ```
 
@@ -130,7 +130,7 @@ want to retrieve directly rather than through `IndexSource`'s write path.
 `PgvecStore`'s retriever takes `PgvecRetrieverOptions{K}` (or a map with the
 same keys) as the request's options.
 
-`PgvecStore` takes two options:
+`PgvecStore` takes three options:
 
 - `WithTextSearchLanguages(langs...)` — the Postgres text-search
   configurations for full-text search (default `"german"`), stored in the
@@ -148,25 +148,61 @@ same keys) as the request's options.
   `NewPgvecStore` fails with `ErrEmbeddingDimMismatch` instead, so a wrong
   dimension in a config can't wipe the index. An empty table is always
   migrated.
+- `WithSourceMetaKeys(keys...)` — see [Source administration](#source-administration)
+  below. `LocalvecStore` takes the same as `WithLocalvecSourceMetaKeys`.
 
-`PgvecStore.Retrieve` does a plain, unfiltered similarity search. An app
-wanting SQL-side filtering (date ranges, tags, ...) runs its own query
-against `Pool`/`Embedder` instead — see [Extending a store](#extending-a-store)
-below.
-
-Both stores also implement:
+`Retrieve(ctx, query, k)` on either store is a plain similarity search.
+Filtering comes in each store's own terms, the same way keyword search
+does:
 
 ```go
-type Source struct { URL, Source string; Chunks int }
-
-func (s *LocalvecStore) Sources(ctx context.Context) ([]Source, error)
-func (s *PgvecStore) Sources(ctx context.Context) ([]Source, error)
+func (s *PgvecStore) RetrieveWhere(ctx context.Context, query *ai.Document, k int, extraWhere string, extraArgs []any) ([]*ai.Document, error)
+func (s *LocalvecStore) RetrieveFiltered(ctx context.Context, query *ai.Document, k int, filter func(meta map[string]any) bool) ([]*ai.Document, error)
 ```
 
-— a bare "what's indexed" listing, grouped only by (url, source) with no
-further metadata, good enough for a simple admin page. An app layering its
-own metadata on top (tag/date/rank, say) defines its own, richer `Sources`
-instead — same shadowing relationship as `Retrieve` above.
+`RetrieveWhere` takes a SQL condition whose placeholders start at `$3`
+(`$1` is the query vector, `$2` the limit) — the same numbering as
+`KeywordSearch`, so an app renders its filter once for both. The condition
+narrows what the index ranks, so a rare match still fills `k`.
+`RetrieveFiltered` can only filter after localvec has ranked, so it fetches
+10·k candidates and may return fewer than `k` when the filter is narrow.
+
+#### Source administration
+
+Both stores list, retag and delete indexed documents:
+
+```go
+type Source struct {
+	URL, Source string
+	Metadata    map[string]string
+	Chunks      int
+}
+
+func (s *PgvecStore) Sources(ctx context.Context) ([]Source, error)
+func (s *PgvecStore) UpdateMetadata(ctx context.Context, old Source, newMetadata map[string]string) (int, error)
+func (s *PgvecStore) DeleteSource(ctx context.Context, src Source) (int, error)
+func (s *PgvecStore) Reset(ctx context.Context) error
+// ... and the same four on *LocalvecStore
+```
+
+A source is a group of chunks with the same url, source and the metadata
+fields named with `WithSourceMetaKeys` — which fields those are is the
+app's call (ask-the-records uses `tag`, `datum`, `rank`; answer-email
+`studiengang`, `abschluss`, `doctype`, `semester`). Without the option a
+source is url and source alone. A file whose chunks carry two different
+tags is two sources, so an admin can see a half-finished retag;
+`UpdateMetadata` moves one group's chunks to new values (an empty value
+removes the field), and `DeleteSource` removes exactly one group, unlike
+`DeleteBySource`, which removes every chunk of a file.
+
+The keys are set on the store rather than passed to each call because they
+define one grouping that `Sources`, `UpdateMetadata` and `DeleteSource` must
+agree on. They are checked to be plain names, since `PgvecStore`
+interpolates them into SQL.
+
+`Source` marshals to one flat JSON object — `{"source":"a.pdf","tag":"Senat","chunks":3}` —
+and unmarshals every other field into `Metadata`, so an admin UI can send a
+listed source back unchanged as the `old`/`src` argument.
 
 ### Crawling
 
@@ -564,17 +600,19 @@ A few things this trims that a real app adds back in: [HyDE/reranking/RRF fusion
 
 ### Extending a store
 
-When an app needs more than `VectorStore` offers — filtered retrieval,
-keyword search, retagging/deleting a named source — embed the engine store
-and add those methods against its exported `Pool`/`Embedder`:
+When an app needs its own filter type on top of `VectorStore`, embed the
+engine store — which brings `Index`, the deletes, `Sources`,
+`UpdateMetadata`, `DeleteSource`, `Reset` and `Close` — and add methods that
+translate the filter:
 
 ```go
 type myStore struct {
-	*askyourdocs.PgvecStore // Index, DeleteByURL, DeleteBySource, Close, Retriever
+	*askyourdocs.PgvecStore
 }
 
 func newMyStore(ctx context.Context, g *genkit.Genkit, emb ai.Embedder, dsn string) (*myStore, error) {
-	base, err := askyourdocs.NewPgvecStore(ctx, g, "myapp/docs", emb, dsn, 1024)
+	base, err := askyourdocs.NewPgvecStore(ctx, g, "myapp/docs", emb, dsn, 1024,
+		askyourdocs.WithSourceMetaKeys("tag", "datum"))
 	if err != nil {
 		return nil, err
 	}
@@ -585,13 +623,18 @@ func newMyStore(ctx context.Context, g *genkit.Genkit, emb ai.Embedder, dsn stri
 // both exist, but this is the one your own, larger VectorStore interface
 // requires.
 func (s *myStore) Retrieve(ctx context.Context, query *ai.Document, k int, filter myFilter) ([]*ai.Document, error) {
-	// ... query s.Pool directly, using s.Embedder to embed the query ...
+	where, args := filter.sql(3) // placeholders from $3
+	return s.RetrieveWhere(ctx, query, k, where, args)
 }
 
 func (s *myStore) KeywordSearch(ctx context.Context, query string, maxResults int, filter myFilter) ([]*ai.Document, error) {
-	// ... s.PgvecStore.KeywordSearch(ctx, query, maxResults, myStopWords, extraWhere, extraArgs) ...
+	where, args := filter.sql(3)
+	return s.PgvecStore.KeywordSearch(ctx, query, maxResults, myStopWords, where, args)
 }
 ```
+
+Anything else the app needs can still run its own queries against the
+exported `Pool` and `Embedder`.
 
 A Go interface value can be passed wherever a smaller interface is expected
 as long as every method the smaller interface declares exists with an
