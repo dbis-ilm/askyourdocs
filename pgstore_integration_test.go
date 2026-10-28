@@ -585,3 +585,47 @@ func TestIntegrationPgvecIndexBatchIsAtomic(t *testing.T) {
 		t.Fatalf("DeleteBySource = %d, %v; want 250", n, err)
 	}
 }
+
+func TestIntegrationPgvecRetrieverOptions(t *testing.T) {
+	dsn := integrationDSN(t)
+	resetDB(t, dsn)
+	ctx := context.Background()
+
+	s, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatalf("NewPgvecStore: %v", err)
+	}
+	docs := make([]*ai.Document, 12)
+	for i := range docs {
+		docs[i] = ai.DocumentFromText(fmt.Sprintf("Dokument %d", i), nil)
+	}
+	mustIndex(t, s, docs...)
+
+	query := ai.DocumentFromText("Dokument", nil)
+	for _, tc := range []struct {
+		name string
+		opts any
+		want int
+	}{
+		{"none", nil, 10},
+		{"typed", PgvecRetrieverOptions{K: 2}, 2},
+		{"pointer", &PgvecRetrieverOptions{K: 3}, 3},
+		{"map from the Dev UI", map[string]any{"k": float64(4)}, 4},
+		{"zero K", PgvecRetrieverOptions{}, 10},
+	} {
+		resp, err := s.Retriever.Retrieve(ctx, &ai.RetrieverRequest{Query: query, Options: tc.opts})
+		if err != nil {
+			t.Errorf("%s: Retrieve: %v", tc.name, err)
+			continue
+		}
+		if len(resp.Documents) != tc.want {
+			t.Errorf("%s: got %d documents, want %d", tc.name, len(resp.Documents), tc.want)
+		}
+	}
+
+	// Another store's options type is an error, not silently the default.
+	type otherOptions struct{ K int }
+	if _, err := s.Retriever.Retrieve(ctx, &ai.RetrieverRequest{Query: query, Options: otherOptions{K: 1}}); err == nil {
+		t.Error("Retrieve with a foreign options type: got nil error")
+	}
+}

@@ -183,7 +183,7 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 		return nil, err
 	}
 
-	s.Retriever = genkit.DefineRetriever(g, name, nil, s.retrieve)
+	s.Retriever = genkit.DefineRetrieverAction(g, name, nil, s.retrieve)
 	return s, nil
 }
 
@@ -409,19 +409,20 @@ func (s *PgvecStore) Index(ctx context.Context, docs []*ai.Document) error {
 	return nil
 }
 
+// PgvecRetrieverOptions configures a retrieval through PgvecStore.Retriever,
+// passed as the request's Options: a PgvecRetrieverOptions, a pointer to one,
+// or a map with the same JSON keys (as the Genkit Developer UI sends).
+type PgvecRetrieverOptions struct {
+	// K is how many documents to return; 0 means 10.
+	K int `json:"k,omitempty"`
+}
+
 // retrieve is the Genkit retriever callback, used by the Developer UI and by
 // any caller going through Retriever instead of Retrieve directly.
-func (s *PgvecStore) retrieve(ctx context.Context, req *ai.RetrieverRequest) (*ai.RetrieverResponse, error) {
-	k := 10
-	if opts, ok := req.Options.(map[string]any); ok {
-		if v, ok := opts["k"]; ok {
-			switch kv := v.(type) {
-			case float64:
-				k = int(kv)
-			case int:
-				k = kv
-			}
-		}
+func (s *PgvecStore) retrieve(ctx context.Context, req *ai.RetrieverRequest, opts PgvecRetrieverOptions) (*ai.RetrieverResponse, error) {
+	k := opts.K
+	if k <= 0 {
+		k = 10
 	}
 	docs, err := s.Retrieve(ctx, req.Query, k)
 	if err != nil {
