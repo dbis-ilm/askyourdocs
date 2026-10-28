@@ -17,6 +17,7 @@
 package askyourdocs
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/firebase/genkit/go/plugins/compat_oai"
 	"github.com/firebase/genkit/go/plugins/googlegenai"
 	"github.com/firebase/genkit/go/plugins/ollama"
+	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 )
 
@@ -235,14 +237,14 @@ func (p *Providers) Model(g *genkit.Genkit, spec string) (ai.Model, error) {
 	case provider == ProviderOllama && p.ollama != nil:
 		m = p.ollama.DefineModel(g, ollama.ModelDefinition{Name: name, Type: "chat"}, nil)
 	case provider == ProviderGPUStack && p.gpustack != nil:
-		// DefineModel rather than NewModel: NewModel decodes the config into
-		// the OpenAI SDK's params and drops chat_template_kwargs, which
-		// GenerateConfig needs to switch thinking off. DefineModel passes
-		// unknown map keys through to the request body.
-		m = p.gpustack.DefineModel(ProviderGPUStack, name, ai.ModelOptions{Supports: &compat_oai.BasicText})
-		genkit.RegisterAction(g, m)
+		// GPUStackConfig rather than the SDK's params (NewModel): those have
+		// no field for chat_template_kwargs, which GenerateConfig needs to
+		// switch thinking off.
+		action := compat_oai.NewChatModel[GPUStackConfig](p.gpustack, name, ai.ModelOptions{Supports: &compat_oai.BasicText})
+		genkit.RegisterAction(g, action)
+		m = action
 	case provider == ProviderGoogleAI && p.googleAI != nil:
-		m = googlegenai.GoogleAIModel(g, name)
+		m = genkit.LookupModel(g, api.NewName(ProviderGoogleAI, name))
 	default:
 		return nil, fmt.Errorf("model spec %q was not passed to NewProviders", spec)
 	}
@@ -275,9 +277,8 @@ func (p *Providers) Embedder(g *genkit.Genkit, spec string, dim int) (ai.Embedde
 		genkit.RegisterAction(g, action)
 		e = action
 	case provider == ProviderGoogleAI && p.googleAI != nil:
-		var err error
-		if e, err = p.googleAI.DefineEmbedder(g, name, &ai.EmbedderOptions{Dimensions: dim}); err != nil {
-			return nil, fmt.Errorf("embedder %q: %w", spec, err)
+		if e = genkit.LookupEmbedder(g, api.NewName(ProviderGoogleAI, name)); e != nil {
+			e = &outputDimEmbedder{Embedder: e, dim: dim}
 		}
 	default:
 		return nil, fmt.Errorf("embedder spec %q was not passed to NewProviders", spec)
@@ -348,17 +349,58 @@ func GenerateConfig(spec string, o GenerateOptions) any {
 		}
 		return cfg
 	case ProviderGPUStack:
-		// GPUStack serves through vLLM, SGLang or llama.cpp; all three take
-		// max_tokens, and switch thinking via the chat template's
-		// enable_thinking flag (Qwen3 and others). A template without that
-		// flag ignores it.
-		cfg := map[string]any{
-			"chat_template_kwargs": map[string]any{"enable_thinking": o.Think},
-		}
-		if o.MaxTokens > 0 {
-			cfg["max_tokens"] = o.MaxTokens
-		}
-		return cfg
+		think := o.Think
+		return &GPUStackConfig{MaxOutputTokens: o.MaxTokens, EnableThinking: &think}
 	}
 	return nil
+}
+
+// outputDimEmbedder asks a Google AI embedder for dim-sized vectors. The
+// API returns the model's default size (3072 for gemini-embedding-001)
+// unless the request sets outputDimensionality; the plugin's
+// EmbedderOptions.Dimensions only describes the embedder and isn't sent.
+// A request that already carries options is passed on unchanged.
+type outputDimEmbedder struct {
+	ai.Embedder
+	dim int
+}
+
+func (e *outputDimEmbedder) Embed(ctx context.Context, req *ai.EmbedRequest) (*ai.EmbedResponse, error) {
+	if req != nil && req.Options == nil {
+		next := *req
+		// The plugin converts the map into its genai.EmbedContentConfig.
+		next.Options = map[string]any{"outputDimensionality": e.dim}
+		req = &next
+	}
+	return e.Embedder.Embed(ctx, req)
+}
+
+// GPUStackConfig is the request config of a GPUStack chat model, what
+// GenerateConfig returns for a gpustack spec. GPUStack serves through vLLM,
+// SGLang or llama.cpp; all three take max_tokens, and switch thinking via
+// the chat template's enable_thinking flag (Qwen3 and others). A template
+// without that flag ignores it. Anything else a backend accepts goes in
+// RequestConfig.Extra, keyed by its wire name.
+type GPUStackConfig struct {
+	compat_oai.RequestConfig
+
+	// MaxOutputTokens caps the generated tokens, sent as max_tokens; 0
+	// leaves it to the server.
+	MaxOutputTokens int `json:"maxOutputTokens,omitempty" jsonschema:"minimum=0" jsonschema_description:"Maximum number of tokens to generate, sent as max_tokens. 0 leaves it to the server."`
+	// EnableThinking switches the model's thinking on or off, sent as
+	// chat_template_kwargs.enable_thinking; nil leaves the template default.
+	EnableThinking *bool `json:"enableThinking,omitempty" jsonschema_description:"Switches thinking on or off, sent as chat_template_kwargs.enable_thinking. Unset leaves the chat template's default."`
+}
+
+// ApplyToChatCompletion implements compat_oai.ChatConfig.
+func (c GPUStackConfig) ApplyToChatCompletion(params *openai.ChatCompletionNewParams) {
+	c.ApplyVersion(params)
+	if c.MaxOutputTokens > 0 {
+		params.MaxTokens = openai.Int(int64(c.MaxOutputTokens))
+	}
+	if c.EnableThinking != nil {
+		compat_oai.AddExtraFields(params, map[string]any{
+			"chat_template_kwargs": map[string]any{"enable_thinking": *c.EnableThinking},
+		})
+	}
 }

@@ -30,8 +30,8 @@ import (
 
 // defineFakeLLM registers a model that answers every prompt with reply.
 func defineFakeLLM(g *genkit.Genkit, name, reply string) ai.Model {
-	return genkit.DefineModel(g, name, &ai.ModelOptions{Supports: &ai.ModelSupports{}},
-		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
+	return genkit.DefineModelAction(g, name, &ai.ModelOptions{Supports: &ai.ModelSupports{}},
+		func(ctx context.Context, req *ai.ModelRequest, _ any, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			return &ai.ModelResponse{
 				Request: req,
 				Message: ai.NewModelTextMessage(reply),

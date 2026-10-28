@@ -127,6 +127,8 @@ database to run, good for a single-node app or a demo. `PgvecStore` wraps
 PostgreSQL + pgvector, with schema creation. Both expose a `Retriever ai.Retriever` field
 (`PgvecStore` additionally exposes `Pool` and `Embedder`) for callers that
 want to retrieve directly rather than through `IndexSource`'s write path.
+`PgvecStore`'s retriever takes `PgvecRetrieverOptions{K}` (or a map with the
+same keys) as the request's options.
 
 `PgvecStore` takes two options:
 
@@ -238,7 +240,7 @@ cfg, err := askyourdocs.ProviderConfigFromEnv() // OLLAMA_HOST, GPUSTACK_URL/_AP
 p, err := askyourdocs.NewProviders(cfg, nil, llmSpec, rerankSpec, embeddingSpec)
 genk := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
 llm, err := p.Model(genk, llmSpec)
-emb, err := p.Embedder(genk, embeddingSpec, 1024) // already wrapped with NewPrefixEmbedder
+emb, err := p.Embedder(genk, embeddingSpec, 1024) // dim-sized vectors, already wrapped with NewPrefixEmbedder
 
 opts, err := askyourdocs.GenerateOptionsFromEnv() // OLLAMA_NUM_CTX, OLLAMA_KEEP_ALIVE, OLLAMA_THINK
 modelConfig := askyourdocs.GenerateConfig(llmSpec, opts)
@@ -246,7 +248,7 @@ modelConfig := askyourdocs.GenerateConfig(llmSpec, opts)
 
 `NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{askyourdocs.ProviderOllama, askyourdocs.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
 
-`GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; `max_tokens` and `chat_template_kwargs.enable_thinking` for GPUStack (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
+`GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; a `*GPUStackConfig` for GPUStack, sent as `max_tokens` and `chat_template_kwargs.enable_thinking` (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there; other backend fields go in its `Extra`); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
 
 The library reads no environment on its own; `ProviderConfigFromEnv`/`GenerateOptionsFromEnv` are optional helpers for apps that use the conventional variable names. Switching the embedding model (or provider) means re-indexing: vectors from different models don't compare, even at the same dimension.
 
