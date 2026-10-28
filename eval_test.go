@@ -16,7 +16,13 @@
 
 package askyourdocs
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/genkit"
+)
 
 func TestParseJudgeResponse(t *testing.T) {
 	cases := []struct {
@@ -147,5 +153,36 @@ func TestFormatContext(t *testing.T) {
 	want := "plain string chunk\n---\nchunk with text field\n---\n{\"other\":\"no text field\"}"
 	if got != want {
 		t.Errorf("formatContext = %q, want %q", got, want)
+	}
+}
+
+func TestLLMEvaluatorsRunThroughRegistry(t *testing.T) {
+	ctx := context.Background()
+	g := genkit.Init(ctx)
+	defineFakeLLM(g, "test/judge", `{"score": 0.75, "reason": "ok"}`)
+	RegisterEvaluators(g, "test/judge")
+
+	example := &ai.Example{
+		TestCaseId: "t",
+		Input:      map[string]any{"question": "Wann öffnet die Mensa?"},
+		Output:     map[string]any{"answer": "Um 11 Uhr."},
+		Context:    []any{"Die Mensa öffnet um 11 Uhr."},
+	}
+	for _, name := range []string{"custom/faithfulness", "custom/answerRelevancy"} {
+		ev := genkit.LookupEvaluator(g, name)
+		if ev == nil {
+			t.Fatalf("%s not registered", name)
+		}
+		// Options as the genkit CLI or Dev UI may send them are accepted
+		// and ignored, as before.
+		for _, opts := range []any{nil, map[string]any{"anything": 1}} {
+			resp, err := ev.Evaluate(ctx, &ai.EvaluatorRequest{Dataset: []*ai.Example{example}, Options: opts})
+			if err != nil {
+				t.Fatalf("%s with options %v: %v", name, opts, err)
+			}
+			if got := (*resp)[0].Evaluation[0].Score; got != 0.75 {
+				t.Errorf("%s with options %v: score = %v, want 0.75", name, opts, got)
+			}
+		}
 	}
 }
