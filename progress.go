@@ -51,6 +51,9 @@ const (
 	// indexPage, the last one being URL — whether indexing it succeeded is
 	// in the CrawlResult, not here.
 	StageCrawlPageIndexed ProgressStage = "crawl-page-indexed"
+	// StageCrawlCheckGone: RunCrawl (WithRemovePage) is checking whether
+	// URL, the Done-th of Total known pages not crawled this time, is gone.
+	StageCrawlCheckGone ProgressStage = "crawl-check-gone"
 	// StageReindexFile: ReindexCrawlData has processed Done of Total cached
 	// files, the last one being File. A file that can't be read or parsed is
 	// skipped without an event.
@@ -100,6 +103,8 @@ func GermanProgress(p Progress) string {
 		return fmt.Sprintf("Indexiere %d gecrawlte Seiten...", p.Total)
 	case StageCrawlPageIndexed:
 		return fmt.Sprintf("%d/%d Seiten indexiert", p.Done, p.Total)
+	case StageCrawlCheckGone:
+		return fmt.Sprintf("Prüfe nicht mehr gefundene Seite %d/%d: %s", p.Done, p.Total, p.URL)
 	case StageReindexFile:
 		return fmt.Sprintf("%d/%d Dateien verarbeitet (%s)", p.Done, p.Total, p.File)
 	}

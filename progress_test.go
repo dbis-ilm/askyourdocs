@@ -37,6 +37,7 @@ func TestGermanProgressWordsEveryStage(t *testing.T) {
 		{Progress{Stage: StageCrawlFetch, Done: 3, Total: 50, Depth: 1, URL: "https://a.example/x"}, "Seite 3/50 (Tiefe 1): https://a.example/x"},
 		{Progress{Stage: StageCrawlIndexing, Total: 40}, "Indexiere 40 gecrawlte Seiten..."},
 		{Progress{Stage: StageCrawlPageIndexed, Done: 7, Total: 40}, "7/40 Seiten indexiert"},
+		{Progress{Stage: StageCrawlCheckGone, Done: 2, Total: 3, URL: "https://a.example/y"}, "Prüfe nicht mehr gefundene Seite 2/3: https://a.example/y"},
 		{Progress{Stage: StageReindexFile, Done: 1, Total: 9, File: "a.md"}, "1/9 Dateien verarbeitet (a.md)"},
 		{Progress{Stage: "unknown"}, ""},
 	} {
