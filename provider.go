@@ -64,11 +64,11 @@ func ParseModelSpec(spec string) (provider, name string) {
 type ProviderConfig struct {
 	// OllamaHost is the Ollama server, default http://localhost:11434.
 	OllamaHost string
-	// GPUStackURL is the GPUStack server, e.g. http://gpustack:80. The
-	// OpenAI-compatible API is expected under <GPUStackURL>/v1 (a URL that
-	// already ends in /v1 is used as is); set
-	// GPUStackAPIPath for a server that serves it elsewhere (older GPUStack
-	// releases use /v1-openai).
+	// GPUStackURL is the base URL of the OpenAI-compatible API, used as is:
+	// e.g. https://gpustack.example/v1 for GPUStack, or
+	// https://openwebui.example/api for Open WebUI. GPUStackAPIPath, if set,
+	// is appended unless the URL already ends in it (older GPUStack
+	// releases: server URL plus "/v1-openai").
 	GPUStackURL     string
 	GPUStackAPIPath string
 	GPUStackAPIKey  string
@@ -181,19 +181,18 @@ func NewProviders(cfg ProviderConfig, allowed []string, specs ...string) (*Provi
 	return p, nil
 }
 
-// gpustackBaseURL joins the server URL and the API path. A URL that already
-// ends in the API path is taken as is: the GPUStack UI shows the API
-// endpoint with /v1, and that is what people paste into GPUSTACK_URL.
+// gpustackBaseURL is the API base URL: serverURL as is, with apiPath
+// appended only when one is set and serverURL doesn't already end in it.
+// Nothing is appended by default: the GPUStack UI shows the API endpoint
+// with /v1, and other OpenAI-compatible servers (Open WebUI: /api) use
+// other paths.
 func gpustackBaseURL(serverURL, apiPath string) string {
-	if apiPath == "" {
-		apiPath = "/v1"
-	}
 	base := strings.TrimRight(serverURL, "/")
-	path := "/" + strings.Trim(apiPath, "/")
-	if strings.HasSuffix(base, path) {
+	path := strings.Trim(apiPath, "/")
+	if path == "" || strings.HasSuffix(base, "/"+path) {
 		return base
 	}
-	return base + path
+	return base + "/" + path
 }
 
 func contains(list []string, s string) bool {
