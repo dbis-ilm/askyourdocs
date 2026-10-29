@@ -295,7 +295,7 @@ Small pieces every QA app ends up needing, none tied to a particular document do
 Every app resolves the same kind of settings (`LLM_MODEL`, `RERANK_MODEL`, `EMBEDDING_MODEL`) to Genkit models and an embedder, and builds the same per-request config. `provider.go` does that once. A model spec is `<provider>/<model>`:
 
 - `ollama/gemma4:12b` — local Ollama. A spec without a known prefix is an Ollama name, so a bare `EMBEDDING_MODEL=mxbai-embed-large` keeps working.
-- `gpustack/qwen3-8b` — a model deployed on GPUStack, reached through its OpenAI-compatible API (`<GPUSTACK_URL>/v1`; set `GPUSTACK_API_PATH=/v1-openai` for older GPUStack releases). The name is the one shown in GPUStack's model list.
+- `gpustack/qwen3-8b` — a model deployed on GPUStack, reached through its OpenAI-compatible API. `GPUSTACK_URL` is that API's base URL, used as is (`https://gpustack.example/v1`); any other OpenAI-compatible server works the same way, e.g. Open WebUI with `https://openwebui.example/api` and one of its API keys. `GPUSTACK_API_PATH`, if set, is appended unless the URL already ends in it (older GPUStack releases: server URL plus `/v1-openai`). The name is the one shown in GPUStack's model list.
 - `googleai/gemini-2.5-flash` — Gemini; the key comes from `GEMINI_API_KEY`.
 
 ```go

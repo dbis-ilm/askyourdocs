@@ -132,7 +132,7 @@ func TestProvidersGPUStack(t *testing.T) {
 		"/v1/embeddings": `{"object":"list","model":"nomic-embed-text-v1.5",
 			"data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}]}`,
 	})
-	cfg := ProviderConfig{GPUStackURL: srv.URL + "/", GPUStackAPIKey: "secret"}
+	cfg := ProviderConfig{GPUStackURL: srv.URL + "/v1/", GPUStackAPIKey: "secret"}
 	p, err := NewProviders(cfg, []string{ProviderOllama, ProviderGPUStack}, "gpustack/qwen3-8b", "gpustack/nomic-embed-text-v1.5")
 	if err != nil {
 		t.Fatal(err)
@@ -321,10 +321,14 @@ func TestGenerateOptionsFromEnv(t *testing.T) {
 
 func TestGPUStackBaseURL(t *testing.T) {
 	for _, tc := range []struct{ url, path, want string }{
-		{"https://gpustack.example", "", "https://gpustack.example/v1"},
-		{"https://gpustack.example/", "", "https://gpustack.example/v1"},
+		// The URL is the API base, used as is: nothing is appended by default.
 		{"https://gpustack.example/v1", "", "https://gpustack.example/v1"},
 		{"https://gpustack.example/v1/", "", "https://gpustack.example/v1"},
+		{"https://openwebui.example/api", "", "https://openwebui.example/api"},
+		{"https://gpustack.example", "", "https://gpustack.example"},
+		// A path is appended unless the URL already ends in it.
+		{"https://openwebui.example", "/api", "https://openwebui.example/api"},
+		{"https://openwebui.example/api/", "api", "https://openwebui.example/api"},
 		{"https://gpustack.example", "/v1-openai/", "https://gpustack.example/v1-openai"},
 		{"https://gpustack.example/v1-openai", "v1-openai", "https://gpustack.example/v1-openai"},
 	} {
@@ -339,7 +343,7 @@ func TestGPUStackConfigReachesTheWire(t *testing.T) {
 		"/v1/chat/completions": `{"id":"1","object":"chat.completion","created":1,"model":"qwen3-8b",
 			"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
 	})
-	p, err := NewProviders(ProviderConfig{GPUStackURL: srv.URL}, nil, "gpustack/qwen3-8b")
+	p, err := NewProviders(ProviderConfig{GPUStackURL: srv.URL + "/v1"}, nil, "gpustack/qwen3-8b")
 	if err != nil {
 		t.Fatal(err)
 	}
