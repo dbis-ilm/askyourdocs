@@ -45,8 +45,13 @@ type CrawlResult struct {
 	PagesSaved   int `json:"pagesSaved"`
 	PagesIndexed int `json:"pagesIndexed"`
 	// ChunksIndexed sums what indexPage returned across all pages.
-	ChunksIndexed int      `json:"chunksIndexed"`
-	Errors        []string `json:"errors,omitempty"`
+	ChunksIndexed int `json:"chunksIndexed"`
+	// PagesUnchanged counts pages WithManifest skipped because their text
+	// hadn't changed since they were last indexed.
+	PagesUnchanged int `json:"pagesUnchanged,omitempty"`
+	// PagesRemoved counts pages WithRemovePage removed as gone (404/410).
+	PagesRemoved int      `json:"pagesRemoved,omitempty"`
+	Errors       []string `json:"errors,omitempty"`
 }
 
 // ReindexResult summarises one run of ReindexCrawlData.
@@ -358,12 +363,23 @@ func removeBoilerplateParas(pages []crawledPage) {
 // as Markdown under outputDir — ReindexCrawlData can later replay that cache
 // without re-fetching the site.
 //
+// Run again over the same seeds, it re-crawls: indexPage is expected to
+// replace a page's chunks (delete by URL, then index). opts make that cheap
+// and complete — WithManifest skips pages whose text is unchanged,
+// WithRemovePage removes pages that are gone. Without opts nothing is
+// remembered between runs.
+//
 // Errors on individual pages are collected in CrawlResult.Errors; only
-// fatal errors (no seeds) cause an early return. progress, if non-nil,
-// receives a StageCrawlFetch event per page visit, StageCrawlIndexing once
-// fetching is done, and a StageCrawlPageIndexed event per page indexed;
-// wrap a text callback with ProgressMessages.
-func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc) (CrawlResult, error) {
+// fatal errors (no seeds, an unreadable manifest) cause an early return.
+// progress, if non-nil, receives a StageCrawlFetch event per page visit,
+// StageCrawlIndexing once fetching is done, a StageCrawlPageIndexed event
+// per page indexed or skipped as unchanged, and a StageCrawlCheckGone event
+// per page checked for removal; wrap a text callback with ProgressMessages.
+func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc, opts ...CrawlOption) (CrawlResult, error) {
+	var o crawlOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if len(cfg.SeedURLs) == 0 {
 		return CrawlResult{}, fmt.Errorf("no seed URLs provided")
 	}
@@ -379,6 +395,18 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 	delayMs := cfg.DelayMs
 	if delayMs <= 0 {
 		delayMs = 500
+	}
+
+	// Load the manifest before fetching anything: an unreadable one is a
+	// fatal error, better found before the crawl than after it.
+	var manifest crawlManifest
+	manifestPath := filepath.Join(outputDir, CrawlManifestFile)
+	changes := manifestChanges{set: map[string]manifestEntry{}, removed: map[string]bool{}}
+	if o.manifest {
+		var err error
+		if manifest, err = loadCrawlManifest(manifestPath); err != nil {
+			return CrawlResult{}, err
+		}
 	}
 
 	// Build allowed host+path prefixes from seed URLs.
@@ -460,6 +488,8 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 	progress.report(Progress{Stage: StageCrawlIndexing, Total: len(crawledPages)})
 
 	// ── Phase 3: Save and index cleaned content ──
+	now := time.Now().UTC()
+
 	saveCrawlData := os.Getenv("SAVE_CRAWL_DATA") == "1"
 	slog.DebugContext(ctx, "crawl: indexing", "pages", len(crawledPages), "saveCrawlData", saveCrawlData, "outputDir", outputDir)
 	for i, cp := range crawledPages {
@@ -471,14 +501,44 @@ func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage I
 			}
 		}
 
+		var hash string
+		if o.manifest {
+			hash = pageHash(o.fingerprint, cp.paras)
+			if prev, ok := manifest.Pages[cp.url]; ok && prev.Hash == hash && !o.force {
+				result.PagesUnchanged++
+				changes.set[cp.url] = manifestEntry{Hash: hash, File: cp.filename, LastSeen: now}
+				progress.report(Progress{Stage: StageCrawlPageIndexed, Done: i + 1, Total: len(crawledPages), URL: cp.url})
+				continue
+			}
+		}
+
 		indexed, err := indexPage(ctx, cp.url, cp.paras)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("index %s: %v", cp.url, err))
+			// indexPage may have deleted the page's old chunks before
+			// failing; forget its hash so the next run indexes it again.
+			if o.manifest {
+				changes.removed[cp.url] = true
+			}
 		} else {
 			result.PagesIndexed++
 			result.ChunksIndexed += indexed
+			if o.manifest {
+				changes.set[cp.url] = manifestEntry{Hash: hash, File: cp.filename, LastSeen: now}
+			}
 		}
 		progress.report(Progress{Stage: StageCrawlPageIndexed, Done: i + 1, Total: len(crawledPages), URL: cp.url})
+	}
+
+	// ── Phase 4: Remove pages that are gone ──
+	if o.manifest && o.removePage != nil {
+		removeGonePages(ctx, &result, manifest, crawledPages, allowedPrefixes, outputDir, delayMs, o.removePage, changes, progress)
+	}
+
+	if o.manifest {
+		if err := saveCrawlManifest(manifestPath, changes); err != nil {
+			result.Errors = append(result.Errors, err.Error())
+		}
 	}
 
 	return result, nil

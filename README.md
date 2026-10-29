@@ -218,14 +218,26 @@ Crawls a multi-page site breadth-first, strips boilerplate that repeats across p
 
 ```go
 type CrawlInput struct { SeedURLs []string; MaxPages, MaxDepth, DelayMs int }
-type CrawlResult struct { PagesVisited, PagesSaved, PagesIndexed int; Errors []string }
+type CrawlResult struct { PagesVisited, PagesSaved, PagesIndexed, ChunksIndexed, PagesUnchanged, PagesRemoved int; Errors []string }
 type ReindexResult struct { FilesProcessed, PagesIndexed int; Errors []string }
 
-func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc) (CrawlResult, error)
+func RunCrawl(ctx context.Context, cfg CrawlInput, outputDir string, indexPage IndexPageFunc, progress ProgressFunc, opts ...CrawlOption) (CrawlResult, error)
 func ReindexCrawlData(ctx context.Context, dir string, indexPage IndexPageFunc, progress ProgressFunc) (ReindexResult, error)
+
+func WithManifest(fingerprint string) CrawlOption
+func WithForceReindex() CrawlOption
+func WithRemovePage(remove func(ctx context.Context, pageURL string) error) CrawlOption
 ```
 
 `RunCrawl` does a breadth-first crawl from `cfg.SeedURLs` (same-host/path-prefix only), strips paragraphs that repeat across pages (boilerplate: nav, footers, repeated cards) before indexing, and — with `SAVE_CRAWL_DATA=1` in the environment — caches each cleaned page as Markdown under `outputDir`. `ReindexCrawlData` replays that cache through `indexPage` without re-fetching anything, for when a chunking fix or a changed chunk size should reach an already-crawled site. Carries no app-specific metadata itself — like `IndexSource`, that's entirely the `IndexPageFunc` closure's job.
+
+#### Re-crawling
+
+Running `RunCrawl` again over the same seeds re-crawls the site; `indexPage` is expected to replace a page's chunks (`DeleteByURL`, then index). Three opt-in options make a scheduled re-crawl cheap and complete:
+
+- **`WithManifest(fingerprint)`** keeps `crawl-manifest.json` (`CrawlManifestFile`) in `outputDir`: a hash of every indexed page's cleaned text. A page whose hash is unchanged skips `indexPage` and so the embedding, counted in `PagesUnchanged`. Put whatever changes what `indexPage` makes of the same text — chunk size/overlap, the metadata the closure attaches — into `fingerprint`, so changing it reindexes instead of silently keeping the old chunks. A page whose indexing failed isn't recorded and is retried next time. Several crawls with different seeds can share one `outputDir`; the manifest is merged, not overwritten.
+- **`WithForceReindex()`** indexes every page regardless and still updates the manifest — for after the index was emptied. An app's index reset should also delete the manifest, or the next crawl skips every page as unchanged.
+- **`WithRemovePage(remove)`** (needs `WithManifest`): every manifest page under this crawl's seeds that wasn't crawled this time is fetched once more, and **only a 404 or 410** removes it — `remove` is called, the cached Markdown file is deleted (or `ReindexCrawlData` would bring the page back), and the page leaves the manifest. A 200, a 5xx or no answer keeps it: a crawl cut short by `MaxPages`, a page that is merely no longer linked, or a server having a bad minute must not empty the index. Pages under other seeds are never touched.
 
 #### Fetch safety (SSRF)
 
