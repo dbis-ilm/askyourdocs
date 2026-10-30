@@ -493,6 +493,36 @@ func TestIntegrationPgvecConcurrentStartupsMigrateOnce(t *testing.T) {
 	}
 }
 
+func TestIntegrationPgvecConcurrentFirstStartups(t *testing.T) {
+	dsn := integrationDSN(t)
+	resetDB(t, dsn)
+
+	// Several instances starting at once on a database without the
+	// documents table must not trip over each other's CREATE TABLE and
+	// CREATE INDEX IF NOT EXISTS, which are not safe against concurrent
+	// sessions creating the same object.
+	const n = 6
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for range n {
+		go func() {
+			<-start
+			s, err := NewPgvecStore(context.Background(), genkit.Init(context.Background()), "test/pgvec",
+				dimEmbedder{3}, dsn, 3)
+			if err == nil {
+				s.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	for range n {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent NewPgvecStore: %v", err)
+		}
+	}
+}
+
 func TestIntegrationKeywordSearchMatchesLikeWildcardsLiterally(t *testing.T) {
 	dsn := integrationDSN(t)
 	resetDB(t, dsn)

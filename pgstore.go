@@ -206,11 +206,43 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 	return s, nil
 }
 
+// schemaLockKey names the advisory lock that serializes ensureSchema across
+// processes sharing a database.
+const schemaLockKey = "askyourdocs.documents.schema"
+
 // ensureSchema creates the pgvector extension, documents table, and indexes.
 // If the embedding column dimension does not match embeddingDim, it alters
 // the column type — after truncating the table, which it only does when the
 // table is already empty or resetOnDims is set.
-func (s *PgvecStore) ensureSchema(ctx context.Context, embeddingDim int, resetOnDims bool) error {
+//
+// Several instances starting at once (an app plus its MCP server, say) run
+// it one after the other under a session advisory lock: CREATE ... IF NOT
+// EXISTS is not safe against another session creating the same object at
+// the same time, and fails with a unique violation on the catalog instead.
+func (s *PgvecStore) ensureSchema(ctx context.Context, embeddingDim int, resetOnDims bool) (err error) {
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("ensureSchema: acquire connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext($1))`, schemaLockKey); err != nil {
+		return fmt.Errorf("ensureSchema: lock: %w", err)
+	}
+	defer func() {
+		// Unlock even if ctx was canceled meanwhile. If that fails, close the
+		// connection rather than return it to the pool still holding the lock.
+		if _, uerr := conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(hashtext($1))`, schemaLockKey); uerr != nil {
+			conn.Conn().Close(context.WithoutCancel(ctx))
+			if err == nil {
+				err = fmt.Errorf("ensureSchema: unlock: %w", uerr)
+			}
+		}
+	}()
+	return s.ensureSchemaLocked(ctx, embeddingDim, resetOnDims)
+}
+
+// ensureSchemaLocked does ensureSchema's work; the caller holds the schema lock.
+func (s *PgvecStore) ensureSchemaLocked(ctx context.Context, embeddingDim int, resetOnDims bool) error {
 	ddl := fmt.Sprintf(`
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
