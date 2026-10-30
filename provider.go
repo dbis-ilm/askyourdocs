@@ -121,6 +121,10 @@ type Providers struct {
 	gpustack *compat_oai.OpenAICompatible
 	googleAI *googlegenai.GoogleAI
 
+	gpustackBase   string // API base URL, for CrossEncoder
+	gpustackAPIKey string
+	timeout        time.Duration
+
 	mu        sync.Mutex
 	models    map[string]ai.Model
 	embedders map[string]ai.Embedder
@@ -139,6 +143,7 @@ func NewProviders(cfg ProviderConfig, allowed []string, specs ...string) (*Provi
 	p := &Providers{
 		models:    map[string]ai.Model{},
 		embedders: map[string]ai.Embedder{},
+		timeout:   timeout,
 	}
 	for _, spec := range specs {
 		if spec == "" {
@@ -165,9 +170,11 @@ func NewProviders(cfg ProviderConfig, allowed []string, specs ...string) (*Provi
 				if cfg.GPUStackURL == "" {
 					return nil, fmt.Errorf("model spec %q needs GPUSTACK_URL", spec)
 				}
+				p.gpustackBase = gpustackBaseURL(cfg.GPUStackURL, cfg.GPUStackAPIPath)
+				p.gpustackAPIKey = cfg.GPUStackAPIKey
 				p.gpustack = &compat_oai.OpenAICompatible{
 					Provider: ProviderGPUStack,
-					BaseURL:  gpustackBaseURL(cfg.GPUStackURL, cfg.GPUStackAPIPath),
+					BaseURL:  p.gpustackBase,
 					APIKey:   cfg.GPUStackAPIKey,
 					Opts:     []option.RequestOption{option.WithRequestTimeout(timeout)},
 				}
@@ -252,6 +259,22 @@ func (p *Providers) Model(g *genkit.Genkit, spec string) (ai.Model, error) {
 	}
 	p.models[spec] = m
 	return m, nil
+}
+
+// CrossEncoder resolves a reranker model spec to a CrossEncoder. Only
+// gpustack specs are supported: Ollama has no rerank endpoint, Google AI no
+// cross-encoder models. The spec must have been passed to NewProviders. The
+// server behind GPUSTACK_URL has to serve <base>/rerank — GPUStack does, an
+// Open WebUI proxy does not.
+func (p *Providers) CrossEncoder(spec string) (*CrossEncoder, error) {
+	provider, name := ParseModelSpec(spec)
+	if provider != ProviderGPUStack {
+		return nil, fmt.Errorf("cross-encoder spec %q: only %s/<model> is supported", spec, ProviderGPUStack)
+	}
+	if p.gpustack == nil {
+		return nil, fmt.Errorf("cross-encoder spec %q was not passed to NewProviders", spec)
+	}
+	return NewCrossEncoder(p.gpustackBase, p.gpustackAPIKey, name, p.timeout), nil
 }
 
 // Embedder resolves an embedding model spec to an embedder producing dim-sized
