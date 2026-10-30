@@ -35,6 +35,7 @@ pgstore.go    — PgvecStore (PostgreSQL + pgvector)
 ingest.go     — IngestSource interface + the IndexSource pipeline
 flow.go       — DefineProgressFlow: generic long-running ingest/crawl flow wiring
 retrieve.go   — PromptOptions, GenerateHyDEText, RerankScores, ReciprocalRankFusion
+crossencoder.go — CrossEncoder, ScaleScores: reranking with a cross-encoder model via a /rerank endpoint
 search.go     — ExtractKeywords, ExtractQuotedPhrases, LocalvecKeywordSearch, KeywordSearchSQL (PgvecStore.KeywordSearch)
 eval.go       — RegisterEvaluators: custom/faithfulness, custom/answerRelevancy, custom/injectionResistance
 evalgen.go    — EvalCase[In], GenerateEvalSet: build a genkit eval:flow dataset from a directory of documents
@@ -372,7 +373,7 @@ func WriteInjectionEvalSet[In any](outPath string, buildInput func(question stri
 
 ### Retrieval quality: HyDE, reranking, RRF fusion
 
-Provides the generic mechanics a real RAG answer flow's retrieval step needs: HyDE query expansion, multi-source rank fusion, and LLM-based reranking.
+Provides the generic mechanics a real RAG answer flow's retrieval step needs: HyDE query expansion, multi-source rank fusion, and reranking — by an LLM or a cross-encoder.
 
 ```go
 func PromptOptions(model ai.Model, config any, input map[string]any) []ai.PromptExecuteOption
@@ -385,6 +386,11 @@ func DocText(doc *ai.Document) string
 
 type RerankOptions struct { BatchSize, Parallel, DefaultScore int }
 func RerankScores(ctx context.Context, rerankPrompt ai.Prompt, model ai.Model, config any, question string, texts []string, opts RerankOptions) []int
+
+func (p *Providers) CrossEncoder(spec string) (*CrossEncoder, error)
+func NewCrossEncoder(baseURL, apiKey, model string, timeout time.Duration) *CrossEncoder
+func (c *CrossEncoder) Scores(ctx context.Context, query string, texts []string) ([]float64, error)
+func ScaleScores(scores []float64, max int) []int
 ```
 
 The *orchestration and arithmetic* are domain-neutral even though the *prompts and what to retrieve* are not, so only the former live here:
@@ -392,9 +398,10 @@ The *orchestration and arithmetic* are domain-neutral even though the *prompts a
 - `GenerateHyDEText` executes a caller-supplied HyDE prompt and returns its text, falling back to `question` unchanged on error or an empty reply (HyDE is a retrieval aid, never something retrieval should block on). The prompt's actual wording is the app's own asset — phrasing tuned for meeting protocols is wrong for a website FAQ, and vice versa — so it stays an app-supplied `ai.Prompt`.
 - `ReciprocalRankFusion` merges several weighted, ranked retrieval result lists (one per retrieval source: the question itself, the HyDE passage, sub-questions, keyword search, ...) via the standard `score(d) = Σ weight_i / (k + rank_i(d) + 1)`, deduplicating by document text so the same chunk returned by two sources doesn't appear twice. `k=60` is the standard RRF constant; `maxResults <= 0` means no cap.
 - `RerankScores` scores every candidate text for relevance to `question` via a caller-supplied rerank prompt, batching requests (`RerankOptions.BatchSize`), bounding parallelism (`.Parallel`), deduplicating identical candidate texts (neighbouring chunks routinely expand to the same parent-text window) before scoring, and keeping `.DefaultScore` for any batch whose call fails rather than dropping those chunks.
+- `CrossEncoder` is the alternative to `RerankScores`: a dedicated reranker model (e.g. `bge-reranker-v2-m3`, multilingual, 8k tokens) behind a `/rerank` endpoint in the Jina/Cohere format, which GPUStack, vLLM and llama.cpp serve. All candidates go in one request, so it is much faster than LLM batches and has no reply format to parse. `Providers.CrossEncoder("gpustack/<model>")` builds one from the same `GPUSTACK_URL`/`GPUSTACK_API_KEY` as the chat models; the server there must serve `<base>/rerank` (GPUStack does, an Open WebUI proxy does not). `Scores` returns one score in [0, 1] per text — raw logits (llama.cpp) are passed through a sigmoid — and deduplicates identical texts like `RerankScores`. Unlike `RerankScores` it returns an error instead of default scores, so the caller decides the fallback. `ScaleScores(scores, 10)` maps them onto the 0–10 scale of `RerankScores` and `RateConfidence`; thresholds tuned for an LLM reranker's scores need re-checking, since a cross-encoder's score distribution differs.
 - `PromptOptions` is the one-line `ai.WithModel`/`ai.WithConfig`/`ai.WithInput` assembly both of the above (and an app's own prompt calls) need; it's exported because an app's `promptOptions`/`rerankOptions` helpers are typically a one-line wrapper around it with the app's own model/config fields.
 
-An app wires its own retrieval sources and prompts around these: build `[]RankedList` from your own parallel `Retrieve`/`KeywordSearch` calls, call `ReciprocalRankFusion`, then `RerankScores` on the fused results with your own batch-size/model constants.
+An app wires its own retrieval sources and prompts around these: build `[]RankedList` from your own parallel `Retrieve`/`KeywordSearch` calls, call `ReciprocalRankFusion`, then `RerankScores` (or `CrossEncoder.Scores`) on the fused results with your own batch-size/model constants.
 
 ### Keyword/phrase search
 
