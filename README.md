@@ -139,7 +139,7 @@ want to retrieve directly rather than through `IndexSource`'s write path.
 `PgvecStore`'s retriever takes `PgvecRetrieverOptions{K}` (or a map with the
 same keys) as the request's options.
 
-`PgvecStore` takes three options:
+`PgvecStore` takes four options:
 
 - `WithTextSearchLanguages(langs...)` — the Postgres text-search
   configurations for full-text search (default `"german"`), stored in the
@@ -159,6 +159,15 @@ same keys) as the request's options.
   migrated.
 - `WithSourceMetaKeys(keys...)` — see [Source administration](#source-administration)
   below. `LocalvecStore` takes the same as `WithLocalvecSourceMetaKeys`.
+- `WithReadOnly()` — for an app that reads an index another app maintains,
+  typically with a database role that may only `SELECT`. `NewPgvecStore`
+  then creates, migrates and locks nothing; it only checks that the
+  `documents` table and its full-text column exist (`ErrSchemaMissing`
+  otherwise — start the writer first, or wait and retry), that the vectors
+  have `embeddingDim` dimensions (`ErrEmbeddingDimMismatch`) and that the
+  full-text column was built for the same text-search languages. `Index`,
+  the deletes, `UpdateMetadata` and `Reset` return `ErrReadOnly`. It
+  excludes `WithResetOnDimensionMismatch`.
 
 `Retrieve(ctx, query, k)` on either store is a plain similarity search.
 Filtering comes in each store's own terms, the same way keyword search

@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -762,5 +763,147 @@ func TestIntegrationPgvecRetrieveWhere(t *testing.T) {
 	}
 	if got, err := s.Retrieve(ctx, ai.DocumentFromText("doc", nil), 3); err != nil || len(got) != 3 {
 		t.Errorf("Retrieve = %d docs, %v; want 3", len(got), err)
+	}
+}
+
+// readerRole is a login role that may only SELECT from documents, like the
+// role a reading app gets on a database another app writes. Roles are
+// cluster-wide, so it is dropped again when the test ends.
+const readerRole = "ayd_readonly_test"
+
+// readerDSN creates readerRole, grants it SELECT on documents (which must
+// exist) and returns dsn with its credentials.
+func readerDSN(t *testing.T, dsn string, pool *pgxpool.Pool) string {
+	t.Helper()
+	ctx := context.Background()
+	dropRole := func() error {
+		var exists bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, readerRole).Scan(&exists); err != nil || !exists {
+			return err
+		}
+		if _, err := pool.Exec(ctx, `DROP OWNED BY `+readerRole); err != nil {
+			return err
+		}
+		_, err := pool.Exec(ctx, `DROP ROLE `+readerRole)
+		return err
+	}
+	if err := dropRole(); err != nil { // left over from an aborted run
+		t.Fatalf("drop old role: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE ROLE ` + readerRole + ` LOGIN PASSWORD 'reader'`,
+		`GRANT SELECT ON documents TO ` + readerRole,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// Registered before the reader's stores, so it runs after they closed.
+	t.Cleanup(func() {
+		if err := dropRole(); err != nil {
+			t.Errorf("cleanup: drop role: %v", err)
+		}
+	})
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse DATABASE_URL: %v", err)
+	}
+	u.User = url.UserPassword(readerRole, "reader")
+	return u.String()
+}
+
+func TestIntegrationPgvecReadOnlyWithSelectOnlyRole(t *testing.T) {
+	dsn := integrationDSN(t)
+	pool := resetDB(t, dsn)
+	ctx := context.Background()
+
+	writer, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatalf("NewPgvecStore (writer): %v", err)
+	}
+	mustIndex(t, writer,
+		ai.DocumentFromText("Die Mensa öffnet um elf Uhr.", map[string]any{"url": "https://a.example/mensa"}),
+		ai.DocumentFromText("Die Prüfungsordnung regelt die Bachelorarbeit.", map[string]any{"source": "po.pdf"}),
+	)
+	rdsn := readerDSN(t, dsn, pool)
+
+	// Without the option the reader fails at startup: it may not create
+	// what ensureSchema creates. This is what WithReadOnly is for.
+	if _, err := openStore(t, rdsn, 3); err == nil {
+		t.Fatal("NewPgvecStore without WithReadOnly succeeded for a SELECT-only role; the test role has too many rights")
+	}
+
+	r, err := openStore(t, rdsn, 3, WithReadOnly())
+	if err != nil {
+		t.Fatalf("NewPgvecStore with WithReadOnly: %v", err)
+	}
+	if got, err := r.Retrieve(ctx, ai.DocumentFromText("Mensa", nil), 2); err != nil || len(got) != 2 {
+		t.Fatalf("Retrieve = %d docs, %v; want 2", len(got), err)
+	}
+	if got, err := r.RetrieveWhere(ctx, ai.DocumentFromText("Mensa", nil), 5, `metadata->>'source' = $3`, []any{"po.pdf"}); err != nil || len(got) != 1 {
+		t.Fatalf("RetrieveWhere = %d docs, %v; want 1", len(got), err)
+	}
+	if got, err := r.KeywordSearch(ctx, "Wann öffnet die Mensa?", 10, testStopWords, "", nil); err != nil || len(got) != 1 {
+		t.Fatalf("KeywordSearch = %d docs, %v; want 1", len(got), err)
+	}
+	if srcs, err := r.Sources(ctx); err != nil || len(srcs) != 2 {
+		t.Fatalf("Sources = %v, %v; want 2", srcs, err)
+	}
+	if err := r.Index(ctx, []*ai.Document{ai.DocumentFromText("neu", nil)}); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Index error = %v, want ErrReadOnly", err)
+	}
+	if err := r.Reset(ctx); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Reset error = %v, want ErrReadOnly", err)
+	}
+	if n := countDocs(t, pool); n != 2 {
+		t.Fatalf("%d documents after the reader's writes, want 2", n)
+	}
+
+	// Several readers start side by side: no lock, nothing to wait for.
+	if _, err := openStore(t, rdsn, 3, WithReadOnly()); err != nil {
+		t.Fatalf("second reader: %v", err)
+	}
+}
+
+func TestIntegrationPgvecReadOnlyChecksSchema(t *testing.T) {
+	dsn := integrationDSN(t)
+	pool := resetDB(t, dsn)
+
+	if _, err := openStore(t, dsn, 3, WithReadOnly()); !errors.Is(err, ErrSchemaMissing) {
+		t.Fatalf("no table: err = %v, want ErrSchemaMissing", err)
+	}
+	if _, err := pool.Exec(context.Background(), `SELECT 1 FROM documents LIMIT 0`); err == nil {
+		t.Fatal("read-only open created the documents table")
+	}
+
+	writer, err := openStore(t, dsn, 3)
+	if err != nil {
+		t.Fatalf("NewPgvecStore (writer): %v", err)
+	}
+	mustIndex(t, writer, ai.DocumentFromText("bleibt erhalten", nil))
+
+	if _, err := openStore(t, dsn, 4, WithReadOnly()); !errors.Is(err, ErrEmbeddingDimMismatch) {
+		t.Fatalf("other dimension: err = %v, want ErrEmbeddingDimMismatch", err)
+	}
+	if typ := columnType(t, pool); typ != "vector(3)" {
+		t.Fatalf("column type = %s after read-only open, want vector(3)", typ)
+	}
+	if n := countDocs(t, pool); n != 1 {
+		t.Fatalf("%d documents after read-only open, want 1", n)
+	}
+
+	_, err = openStore(t, dsn, 3, WithReadOnly(), WithTextSearchLanguages("german", "english"))
+	if err == nil || !strings.Contains(err.Error(), "built for german") {
+		t.Fatalf("other languages: err = %v, want full-text column mismatch", err)
+	}
+	if m := tsvMarker(t, pool); m != ftsMarker([]string{"german"}) {
+		t.Fatalf("tsv marker = %q after read-only open, want german only", m)
+	}
+
+	if _, err := pool.Exec(context.Background(), `ALTER TABLE documents DROP COLUMN tsv`); err != nil {
+		t.Fatalf("drop tsv: %v", err)
+	}
+	if _, err := openStore(t, dsn, 3, WithReadOnly()); !errors.Is(err, ErrSchemaMissing) {
+		t.Fatalf("no full-text column: err = %v, want ErrSchemaMissing", err)
 	}
 }
