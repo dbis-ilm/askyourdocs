@@ -190,3 +190,41 @@ func TestSourceWhere(t *testing.T) {
 		t.Errorf("args = %v, want %v", args, want)
 	}
 }
+
+func TestNewPgvecStoreRejectsReadOnlyWithResetBeforeConnecting(t *testing.T) {
+	// The DSN is never used: the option check comes first.
+	_, err := NewPgvecStore(context.Background(), nil, "test", &recordingEmbedder{}, "postgres://unused", 3,
+		WithReadOnly(), WithResetOnDimensionMismatch())
+	if err == nil || !strings.Contains(err.Error(), "exclude each other") {
+		t.Fatalf("NewPgvecStore error = %v, want options exclude each other", err)
+	}
+}
+
+func TestReadOnlyPgvecStoreRefusesEveryWrite(t *testing.T) {
+	// A nil pool would panic: each write must refuse before touching it,
+	// and Index before embedding anything.
+	emb := &recordingEmbedder{}
+	s := &PgvecStore{Embedder: emb, readOnly: true}
+	ctx := context.Background()
+	src := Source{URL: "https://a.example"}
+
+	if err := s.Index(ctx, []*ai.Document{ai.DocumentFromText("a", nil)}); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("Index error = %v, want ErrReadOnly", err)
+	}
+	if len(emb.seen) != 0 {
+		t.Errorf("Index embedded %v on a read-only store", emb.seen)
+	}
+	if err := s.Reset(ctx); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("Reset error = %v, want ErrReadOnly", err)
+	}
+	for name, write := range map[string]func() (int, error){
+		"DeleteByURL":    func() (int, error) { return s.DeleteByURL(ctx, src.URL) },
+		"DeleteBySource": func() (int, error) { return s.DeleteBySource(ctx, "a.pdf") },
+		"UpdateMetadata": func() (int, error) { return s.UpdateMetadata(ctx, src, map[string]string{"tag": "x"}) },
+		"DeleteSource":   func() (int, error) { return s.DeleteSource(ctx, src) },
+	} {
+		if n, err := write(); !errors.Is(err, ErrReadOnly) || n != 0 {
+			t.Errorf("%s = %d, %v, want 0, ErrReadOnly", name, n, err)
+		}
+	}
+}

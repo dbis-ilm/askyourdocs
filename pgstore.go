@@ -53,6 +53,7 @@ type PgvecStore struct {
 	TextSearchLanguages []string
 
 	sourceMetaKeys []string
+	readOnly       bool
 }
 
 // DefaultTextSearchLanguages are the text-search configurations
@@ -65,6 +66,17 @@ var DefaultTextSearchLanguages = []string{"german"}
 // WithResetOnDimensionMismatch was not given.
 var ErrEmbeddingDimMismatch = errors.New("embedding dimension mismatch")
 
+// ErrSchemaMissing is returned (wrapped) by NewPgvecStore with
+// WithReadOnly when the documents table or its full-text column does not
+// exist yet: a read-only store cannot create them, so the writing app has
+// to start first. A caller may wait and retry.
+var ErrSchemaMissing = errors.New("documents schema missing")
+
+// ErrReadOnly is returned by every method that would change the index
+// (Index, DeleteByURL, DeleteBySource, UpdateMetadata, DeleteSource, Reset)
+// on a store opened with WithReadOnly.
+var ErrReadOnly = errors.New("store is read-only")
+
 // PgvecOption configures NewPgvecStore.
 type PgvecOption func(*pgvecConfig)
 
@@ -72,6 +84,20 @@ type pgvecConfig struct {
 	languages      []string
 	resetOnDims    bool
 	sourceMetaKeys []string
+	readOnly       bool
+}
+
+// WithReadOnly opens the store for reading only, for an app that shares a
+// database with another app that maintains the index — typically with a
+// database role that may only SELECT. NewPgvecStore then creates, alters
+// and locks nothing: it checks that the documents table exists
+// (ErrSchemaMissing if not), that its embedding column has embeddingDim
+// dimensions (ErrEmbeddingDimMismatch if not) and that its full-text column
+// was built for the same TextSearchLanguages, and fails otherwise. Every
+// method that writes returns ErrReadOnly without touching the database.
+// It excludes WithResetOnDimensionMismatch.
+func WithReadOnly() PgvecOption {
+	return func(c *pgvecConfig) { c.readOnly = true }
 }
 
 // WithTextSearchLanguages sets the Postgres text-search configurations
@@ -171,7 +197,8 @@ func ftsMarker(langs []string) string {
 // If an existing documents table's embedding column has a different
 // dimension (e.g. after switching embedding models), NewPgvecStore fails
 // with ErrEmbeddingDimMismatch unless the table is empty or
-// WithResetOnDimensionMismatch is given.
+// WithResetOnDimensionMismatch is given. With WithReadOnly it only checks
+// the schema and changes nothing.
 func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Embedder, dsn string, embeddingDim int, opts ...PgvecOption) (*PgvecStore, error) {
 	cfg := pgvecConfig{languages: DefaultTextSearchLanguages}
 	for _, o := range opts {
@@ -184,6 +211,9 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 	if err := checkSourceMetaKeys(cfg.sourceMetaKeys); err != nil {
 		return nil, err
 	}
+	if cfg.readOnly && cfg.resetOnDims {
+		return nil, errors.New("WithReadOnly and WithResetOnDimensionMismatch exclude each other: a read-only store never migrates")
+	}
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -195,9 +225,14 @@ func NewPgvecStore(ctx context.Context, g *genkit.Genkit, name string, emb ai.Em
 		return nil, fmt.Errorf("pgvector ping: %w", err)
 	}
 
-	s := &PgvecStore{Pool: pool, Embedder: emb, TextSearchLanguages: langs, sourceMetaKeys: cfg.sourceMetaKeys}
+	s := &PgvecStore{Pool: pool, Embedder: emb, TextSearchLanguages: langs, sourceMetaKeys: cfg.sourceMetaKeys, readOnly: cfg.readOnly}
 
-	if err := s.ensureSchema(ctx, embeddingDim, cfg.resetOnDims); err != nil {
+	if cfg.readOnly {
+		err = s.checkSchema(ctx, embeddingDim)
+	} else {
+		err = s.ensureSchema(ctx, embeddingDim, cfg.resetOnDims)
+	}
+	if err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -332,6 +367,57 @@ CREATE TABLE IF NOT EXISTS documents (
 	return nil
 }
 
+// checkSchema is ensureSchema for a read-only store: it only reads the
+// catalog (which every role may) and reports what doesn't match instead of
+// fixing it. Indexes are not checked — a missing one makes queries slower,
+// not wrong.
+func (s *PgvecStore) checkSchema(ctx context.Context, embeddingDim int) error {
+	var exists bool
+	if err := s.Pool.QueryRow(ctx, `SELECT to_regclass('documents') IS NOT NULL`).Scan(&exists); err != nil {
+		return fmt.Errorf("checkSchema: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("%w: no documents table; the app that writes the index has to create it first", ErrSchemaMissing)
+	}
+
+	var colType string
+	err := s.Pool.QueryRow(ctx, `
+		SELECT pg_catalog.format_type(atttypid, atttypmod)
+		FROM pg_attribute
+		WHERE attrelid = 'documents'::regclass
+		  AND attname = 'embedding'
+		  AND attnum > 0
+		  AND NOT attisdropped
+	`).Scan(&colType)
+	if err != nil {
+		return fmt.Errorf("check embedding column type: %w", err)
+	}
+	if want := fmt.Sprintf("vector(%d)", embeddingDim); colType != want {
+		return fmt.Errorf("%w: documents table has %s, embedder needs %s; a read-only store cannot migrate it",
+			ErrEmbeddingDimMismatch, colType, want)
+	}
+
+	var have *string
+	err = s.Pool.QueryRow(ctx, `
+		SELECT col_description(attrelid, attnum) FROM pg_attribute
+		WHERE attrelid = 'documents'::regclass AND attname = 'tsv' AND NOT attisdropped`).Scan(&have)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: documents table has no full-text column; the app that writes the index has to create it first", ErrSchemaMissing)
+	}
+	if err != nil {
+		return fmt.Errorf("check full-text column: %w", err)
+	}
+	if want := ftsMarker(s.TextSearchLanguages); have == nil || *have != want {
+		got := "unknown languages"
+		if have != nil {
+			got = strings.TrimPrefix(*have, "askyourdocs:fts=")
+		}
+		return fmt.Errorf("full-text column is built for %s, store is configured for %s; pass the writer's WithTextSearchLanguages",
+			got, strings.Join(s.TextSearchLanguages, ","))
+	}
+	return nil
+}
+
 // ensureFTSColumn makes sure the generated tsv column holds every chunk
 // stemmed with exactly s.TextSearchLanguages, with a GIN index on it. The
 // column's comment records the configurations it was built from; a
@@ -400,6 +486,9 @@ func (s *PgvecStore) KeywordSearch(ctx context.Context, query string, maxResults
 // Index embeds the documents and inserts them into PostgreSQL in a single
 // transaction.
 func (s *PgvecStore) Index(ctx context.Context, docs []*ai.Document) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if len(docs) == 0 {
 		return nil
 	}
@@ -560,6 +649,9 @@ func ScanDocs(rows pgx.Rows) ([]*ai.Document, error) {
 }
 
 func (s *PgvecStore) DeleteByURL(ctx context.Context, url string) (int, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	tag, err := s.Pool.Exec(ctx, "DELETE FROM documents WHERE metadata->>'url' = $1", url)
 	if err != nil {
 		return 0, fmt.Errorf("delete by url: %w", err)
@@ -568,6 +660,9 @@ func (s *PgvecStore) DeleteByURL(ctx context.Context, url string) (int, error) {
 }
 
 func (s *PgvecStore) DeleteBySource(ctx context.Context, sourceName string) (int, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	tag, err := s.Pool.Exec(ctx, "DELETE FROM documents WHERE metadata->>'source' = $1", sourceName)
 	if err != nil {
 		return 0, fmt.Errorf("delete by source: %w", err)
@@ -669,6 +764,9 @@ func (s *PgvecStore) sourceWhere(src Source, start int) (string, []any) {
 // alone, and keys the store doesn't group by are ignored in newMetadata.
 // Returns how many chunks were updated.
 func (s *PgvecStore) UpdateMetadata(ctx context.Context, old Source, newMetadata map[string]string) (int, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	set := map[string]string{}
 	strip := ""
 	for _, k := range s.sourceMetaKeys {
@@ -695,6 +793,9 @@ func (s *PgvecStore) UpdateMetadata(ctx context.Context, old Source, newMetadata
 // without touching chunks of the same file that carry other metadata.
 // Returns how many chunks were deleted.
 func (s *PgvecStore) DeleteSource(ctx context.Context, src Source) (int, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	where, args := s.sourceWhere(src, 1)
 	tag, err := s.Pool.Exec(ctx, "DELETE FROM documents WHERE "+where, args...)
 	if err != nil {
@@ -705,6 +806,9 @@ func (s *PgvecStore) DeleteSource(ctx context.Context, src Source) (int, error) 
 
 // Reset deletes every indexed document.
 func (s *PgvecStore) Reset(ctx context.Context) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	if _, err := s.Pool.Exec(ctx, "TRUNCATE documents RESTART IDENTITY"); err != nil {
 		return fmt.Errorf("truncate: %w", err)
 	}
