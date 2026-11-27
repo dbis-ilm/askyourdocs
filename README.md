@@ -64,13 +64,26 @@ type Chunk struct { Text, ParentText, Pages, Section, Top, Breadcrumb, URL strin
 
 func SupportedDocumentExt(ext string) bool
 func ExtractParagraphs(path string) ([]Paragraph, error)        // .pdf or .docx
+func ExtractTextParagraphs(r io.Reader, markdown bool) ([]Paragraph, error) // .md, .txt
 func HasTextLayer(paras []Paragraph) bool                       // false for a scanned PDF
 func FetchWebPage(url string) (string, error)
 func FetchWebPageFollowingRefresh(url string) (page, from string, err error) // follows <meta refresh> stubs, same host
 func HTMLToStructuredText(r io.Reader) ([]Paragraph, error)
 func BuildChunks(paras []Paragraph, maxSize, overlapSize int) []Chunk
 func NormalizeSpaces(s string) string
+
+func PlainText(paras []Paragraph) string                 // readable text with "[Page n]" markers
+func SplitText(text string, max int) []string            // parts of ≤ max runes, at paragraph breaks
+func ParsePages(s string) (func(page int) bool, error)   // "1-3,5,8-"; nil = all pages
 ```
+
+`ExtractTextParagraphs` splits Markdown or plain text at blank lines;
+Markdown headings become heading paragraphs and breadcrumbs ("Lease >
+Notice"), fenced code stays whole. It is deliberately not part of
+`ExtractParagraphs`, so apps that gate uploads with `SupportedDocumentExt`
+don't start accepting .md and .txt unasked. `PlainText`, `SplitText` and
+`ParsePages` serve a tool that hands a whole document, or some of its
+pages, to an agent or a model in parts.
 
 `Chunk.ParentText` is an expanded window around each chunk (up to
 `max(maxSize*2, 3000)` chars, bounded by section headings) — index
@@ -322,6 +335,19 @@ modelConfig := askyourdocs.GenerateConfig(llmSpec, opts)
 `NewProviders` only sets up plugins for providers the specs actually name, and fails early on an unknown or misconfigured one. Its `allowed` argument restricts which providers a spec may name: an app whose data must not leave the own infrastructure passes `[]string{askyourdocs.ProviderOllama, askyourdocs.ProviderGPUStack}`, and a `googleai/` spec is then an error instead of a silent upload. `Model` returns the same model for the same spec, so an app can resolve answer and rerank model without comparing them first.
 
 `GenerateConfig` maps the provider-neutral `GenerateOptions` onto each provider: `num_ctx`/`keep_alive`/`think`/`num_predict` for Ollama; a `*GPUStackConfig` for GPUStack, sent as `max_tokens` and `chat_template_kwargs.enable_thinking` (vLLM, SGLang and llama.cpp all accept both; GPUStack fixes the context window at deployment, so `NumCtx` is ignored there; other backend fields go in its `Extra`); nil for Google AI, where a token cap would also count thinking tokens. Thinking is off unless asked for — every prompt in these pipelines asks for a fixed output shape and reasoning tokens are never read.
+
+**Model discovery** for a settings screen, before any spec is resolved:
+`ListOllamaModels` (installed models, embedding models marked),
+`OllamaEmbeddingDim`, `ListOpenAIModels` (an OpenAI-compatible server such
+as GPUStack; it doesn't say what a model is for, `LooksLikeEmbeddingModel`
+guesses from the name) and `OpenAIEmbeddingDim`, which embeds a probe text
+and so also proves that a model embeds. `ValidateBaseURL` checks an entered
+server address (no credentials in it), `IsLocalURL` tells whether document
+text would leave the machine, `URLHost` names the server for a consent
+dialog. Errors are English; a `*ServerError` carries a `Kind`
+(`ErrUnreachable`, `ErrAPIKeyRejected`, `ErrServerStatus`,
+`ErrNotEmbeddingModel`, `ErrNoEmbedding`) for `errors.Is`, so an app can
+word them in its own language.
 
 The library reads no environment on its own; `ProviderConfigFromEnv`/`GenerateOptionsFromEnv` are optional helpers for apps that use the conventional variable names. Switching the embedding model (or provider) means re-indexing: vectors from different models don't compare, even at the same dimension.
 
