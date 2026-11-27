@@ -90,6 +90,8 @@ pages, to an agent or a model in parts.
 `Chunk.Text` for embedding, but feed `Chunk.ParentText` to the LLM at answer
 time for more context than a single small chunk gives you.
 
+Parts of a PDF page set in columns are kept apart. A list of members next to a list of guests used to come out line by line, both columns glued together ("Frau A. Schneider Herr Prof. B. Sattler"); lines are now split at column-wide gaps (three times the font size), and runs of at least two such lines sharing the same columns are written column by column — or row by row with " | " between cells for tables, so a label keeps its value. A single split line is left as it was, since some PDFs report text widths too small.
+
 A scanned PDF without a text layer extracts to nothing, or to a page number
 and a stamp per page. `HasTextLayer` tells that apart (under 20 non-space
 characters per page on average), so an app can refuse such a file with a
