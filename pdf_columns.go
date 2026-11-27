@@ -226,11 +226,9 @@ func writeColumns(run []pdfLine, cols []float64, column func(pdfSegment) int, he
 			byCol[c] = append(byCol[c], pdfLine{y: l.y, Text: s.text})
 		}
 	}
+	// Every column has a line: the run's first line defines the columns.
 	var out []pdfLine
 	for _, col := range byCol {
-		if len(col) == 0 {
-			continue
-		}
 		col[0].brk = len(out) > 0 || run[0].brk
 		out = append(out, col...)
 	}

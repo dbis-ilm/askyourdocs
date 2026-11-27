@@ -150,3 +150,71 @@ func TestArrangeColumnsJoinedHeadings(t *testing.T) {
 		t.Error("sentence taken for headings")
 	}
 }
+
+// Joined headings above a table become its header row.
+func TestArrangeColumnsTableHeadings(t *testing.T) {
+	lines := []pdfLine{
+		line(500, "98:Stimmen: Anzahl:"),
+		line(488, "98:Ja", "300:12"),
+		line(476, "98:Nein", "300:3"),
+	}
+	if got := texts(arrangeColumns(lines)); got != "Stimmen: | Anzahl:\nJa | 12\nNein | 3\n" {
+		t.Fatalf("table headings: %q", got)
+	}
+}
+
+func TestSplitHeadings(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		k    int
+		want int
+	}{
+		{"Teilnehmer/-innen: Gäste:", 2, 2},
+		{"Teilnehmer/-innen: Gäste:", 3, 0},                              // wrong number of columns
+		{"Teilnehmer/-innen:", 1, 0},                                     // a single column needs no split
+		{"Gäste: Entschuldigt", 2, 0},                                    // does not end in a heading
+		{"Die Sitzung beginnt um zehn Uhr und endet spät: Gäste:", 2, 0}, // a sentence
+	} {
+		if got := splitHeadings(tc.text, tc.k); len(got) != tc.want {
+			t.Errorf("splitHeadings(%q, %d) = %q", tc.text, tc.k, got)
+		}
+	}
+}
+
+// Without font sizes the gap falls back to a 12 pt font; empty lines have
+// no segments.
+func TestLineSegmentsEdgeCases(t *testing.T) {
+	if lineSegments(nil) != nil {
+		t.Error("segments of an empty line")
+	}
+	items := []pdf.Text{{X: 50, W: 20, S: "Ja"}, {X: 300, W: 12, S: "12"}}
+	if segs := lineSegments(items); len(segs) != 2 {
+		t.Fatalf("no font size: %+v", segs)
+	}
+}
+
+// A segment starting in a column but running into the next ends the run.
+func TestArrangeColumnsSegmentCrossesColumn(t *testing.T) {
+	lines := []pdfLine{
+		line(500, "98:Frau A", "311:Herr B"),
+		line(488, "98:Frau C", "311:Herr D"),
+		line(476, "98:Ein Satz, der über die Spaltengrenze hinaus bis weit nach rechts läuft"),
+	}
+	got := arrangeColumns(lines)
+	if last := got[len(got)-1]; !last.brk || !strings.HasPrefix(last.Text, "Ein Satz") {
+		t.Fatalf("crossing line: %+v", got)
+	}
+}
+
+// A segment at none of the columns ends the run.
+func TestArrangeColumnsOffColumn(t *testing.T) {
+	lines := []pdfLine{
+		line(500, "98:Frau A", "311:Herr B"),
+		line(488, "98:Frau C", "311:Herr D"),
+		line(476, "200:Seite 2"),
+	}
+	got := arrangeColumns(lines)
+	if last := got[len(got)-1]; !last.brk || last.Text != "Seite 2" {
+		t.Fatalf("off-column line: %+v", got)
+	}
+}
