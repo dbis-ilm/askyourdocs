@@ -62,6 +62,15 @@ type Chunk struct {
 type pdfLine struct {
 	y    float64
 	Text string
+	segs []pdfSegment // parts of the line separated by a column-wide gap
+	brk  bool         // starts a new paragraph regardless of spacing
+}
+
+// pdfSegment is a run of text on a line, separated from its neighbours by a
+// gap far wider than a word space (a column gap).
+type pdfSegment struct {
+	x0, x1 float64
+	text   string
 }
 
 // SupportedDocumentExt reports whether ext (as returned by filepath.Ext,
@@ -160,6 +169,9 @@ func readPDFPages(path string) ([]pageContent, error) {
 	// Pass 2: drop headers and footers, which only become visible once all
 	// pages are known.
 	stripRunningLines(pageLines)
+	for i := range pageLines {
+		pageLines[i] = arrangeColumns(pageLines[i])
+	}
 
 	var pages []pageContent
 	for i, lines := range pageLines {
@@ -218,8 +230,10 @@ func extractPageLines(p pdf.Page) []pdfLine {
 		for i, c := range current {
 			texts[i] = c.Text
 		}
+		// Text is the line as before; segs only take effect where several
+		// lines show the same columns (arrangeColumns).
 		if text := NormalizeSpaces(rowText(texts)); text != "" {
-			lines = append(lines, pdfLine{y: currentY, Text: text})
+			lines = append(lines, pdfLine{y: currentY, Text: text, segs: lineSegments(texts)})
 		}
 		current = nil
 	}
@@ -284,7 +298,7 @@ func linesToText(lines []pdfLine) string {
 	sb.WriteString(lines[0].Text)
 	for i := 1; i < len(lines); i++ {
 		gap := lines[i-1].y - lines[i].y
-		if threshold > 0 && gap > threshold {
+		if lines[i].brk || (threshold > 0 && gap > threshold) {
 			sb.WriteString("\n\n")
 		} else {
 			sb.WriteString("\n")
