@@ -203,6 +203,24 @@ func OllamaEmbeddingDim(ctx context.Context, host, model string) (int, error) {
 	return 0, &ServerError{Kind: ErrNotEmbeddingModel, URL: endpoint, Model: model}
 }
 
+// OllamaCapabilities returns what Ollama reports a model can do, e.g.
+// "completion", "tools", "vision", "thinking", "embedding" (/api/show).
+func OllamaCapabilities(ctx context.Context, host, model string) ([]string, error) {
+	payload, _ := json.Marshal(map[string]string{"model": model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(host, "/")+"/api/show", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	var info struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := doJSON(listClient, req, "", &info); err != nil {
+		return nil, err
+	}
+	return info.Capabilities, nil
+}
+
 // ListOpenAIModels lists the model IDs an OpenAI-compatible server offers
 // under base (e.g. https://gpustack.example/v1). Such servers do not say
 // what a model is for; see LooksLikeEmbeddingModel and OpenAIEmbeddingDim.
