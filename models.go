@@ -138,6 +138,7 @@ type OllamaModel struct {
 	Name      string `json:"name"`
 	Size      int64  `json:"size"` // bytes on disk
 	Embedding bool   `json:"embedding"`
+	Tools     bool   `json:"tools"` // can call tools (agents); false if Ollama reports no capabilities
 }
 
 // ListOllamaModels lists the models installed in the Ollama at host. A
@@ -167,7 +168,7 @@ func ListOllamaModels(ctx context.Context, host string) ([]OllamaModel, error) {
 	for _, m := range resp.Models {
 		emb := slices.Contains(m.Capabilities, "embedding") ||
 			(len(m.Capabilities) == 0 && (strings.Contains(m.Name, "embed") || m.Details.Family == "bert"))
-		out = append(out, OllamaModel{Name: m.Name, Size: m.Size, Embedding: emb})
+		out = append(out, OllamaModel{Name: m.Name, Size: m.Size, Embedding: emb, Tools: slices.Contains(m.Capabilities, "tools")})
 	}
 	return out, nil
 }

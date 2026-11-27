@@ -94,7 +94,7 @@ func TestOllamaModelDiscovery(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/tags", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"models":[
-			{"name":"gemma4:12b","size":8000000000,"capabilities":["completion"]},
+			{"name":"gemma4:12b","size":8000000000,"capabilities":["completion","tools"]},
 			{"name":"bge-m3:latest","size":1200000000,"capabilities":["embedding"]},
 			{"name":"old-embed:latest","size":1},
 			{"name":"minilm:latest","size":1,"details":{"family":"bert"}},
@@ -124,6 +124,9 @@ func TestOllamaModelDiscovery(t *testing.T) {
 	for _, m := range models {
 		if m.Embedding != want[m.Name] {
 			t.Errorf("%s: embedding = %v", m.Name, m.Embedding)
+		}
+		if m.Tools != (m.Name == "gemma4:12b") {
+			t.Errorf("%s: tools = %v", m.Name, m.Tools)
 		}
 	}
 	if dim, err := OllamaEmbeddingDim(ctx, srv.URL, "bge-m3:latest"); err != nil || dim != 1024 {
