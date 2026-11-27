@@ -19,6 +19,7 @@ package askyourdocs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -487,5 +488,52 @@ func TestProvidersGoogleAI(t *testing.T) {
 	_, body = srv.last()
 	if got := body["requests"].([]any)[0].(map[string]any)["outputDimensionality"]; got != float64(256) {
 		t.Errorf("caller's outputDimensionality = %v, want 256", got)
+	}
+}
+
+// Ollama models are registered with the capabilities the server reports,
+// so a tool-capable model missing from Genkit's built-in list can still be
+// used with tools; a model without "tools" is still refused.
+func TestProvidersOllamaToolCapability(t *testing.T) {
+	ctx := context.Background()
+	tool := func(g *genkit.Genkit) ai.ToolRef {
+		return genkit.DefineTool(g, "noop", "does nothing", func(*ai.ToolContext, struct{}) (string, error) { return "", nil })
+	}
+	for _, c := range []struct {
+		caps   string
+		tools  bool
+		reason string
+	}{
+		{`["completion","tools","vision"]`, true, "reports tools"},
+		{`["completion"]`, false, "reports no tools"},
+	} {
+		srv := newFakeServer(t, map[string]string{
+			"/api/show": `{"capabilities":` + c.caps + `}`,
+			"/api/chat": `{"model":"newmodel:9b","message":{"role":"assistant","content":"ok"},"done":true}`,
+		})
+		p, err := NewProviders(ProviderConfig{OllamaHost: srv.URL}, nil, "ollama/newmodel:9b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := genkit.Init(ctx, genkit.WithPlugins(p.Plugins()...))
+		llm, err := p.Model(g, "ollama/newmodel:9b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = genkit.Generate(ctx, g, ai.WithModel(llm), ai.WithPrompt("hi"), ai.WithTools(tool(g)))
+		if (err == nil) != c.tools {
+			t.Errorf("model that %s: Generate with tools err = %v", c.reason, err)
+		}
+	}
+}
+
+func TestOllamaCapabilities(t *testing.T) {
+	srv := newFakeServer(t, map[string]string{"/api/show": `{"capabilities":["completion","tools"]}`})
+	caps, err := OllamaCapabilities(context.Background(), srv.URL, "x")
+	if err != nil || strings.Join(caps, ",") != "completion,tools" {
+		t.Fatalf("caps = %v, %v", caps, err)
+	}
+	if _, err := OllamaCapabilities(context.Background(), "http://127.0.0.1:1", "x"); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("closed port: %v", err)
 	}
 }

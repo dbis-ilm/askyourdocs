@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,6 +228,29 @@ func (p *Providers) Plugins() []api.Plugin {
 	return plugins
 }
 
+// ollamaModelOptions describes an Ollama model by what the server reports
+// for it. Without this Genkit falls back to a built-in list of tool-capable
+// models, which lags behind new releases (gemma4 and qwen3.6 report "tools"
+// but are not on it), and an agent's tool calls are then refused. nil, if
+// Ollama cannot be asked, keeps that fallback.
+func (p *Providers) ollamaModelOptions(name string) *ai.ModelOptions {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	caps, err := OllamaCapabilities(ctx, p.ollama.ServerAddress, name)
+	if err != nil || len(caps) == 0 {
+		return nil
+	}
+	return &ai.ModelOptions{
+		Label: name,
+		Supports: &ai.ModelSupports{
+			Multiturn:  true,
+			SystemRole: true,
+			Tools:      slices.Contains(caps, "tools"),
+			Media:      slices.Contains(caps, "vision"),
+		},
+	}
+}
+
 // Model resolves a chat model spec. g must have been initialized with
 // Plugins(). Resolving the same spec twice returns the same model, so an app
 // can resolve its answer and rerank model without checking whether they are
@@ -241,7 +265,7 @@ func (p *Providers) Model(g *genkit.Genkit, spec string) (ai.Model, error) {
 	var m ai.Model
 	switch {
 	case provider == ProviderOllama && p.ollama != nil:
-		m = p.ollama.DefineModel(g, ollama.ModelDefinition{Name: name, Type: "chat"}, nil)
+		m = p.ollama.DefineModel(g, ollama.ModelDefinition{Name: name, Type: "chat"}, p.ollamaModelOptions(name))
 	case provider == ProviderGPUStack && p.gpustack != nil:
 		// GPUStackConfig rather than the SDK's params (NewModel): those have
 		// no field for chat_template_kwargs, which GenerateConfig needs to
