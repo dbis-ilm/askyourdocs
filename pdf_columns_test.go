@@ -65,6 +65,15 @@ func TestLineSegments(t *testing.T) {
 	if len(segs) != 2 || segs[0].text != "Frau Schneider" || segs[1].text != "Herr Sattler" || segs[1].x0 != 311 {
 		t.Fatalf("segments: %+v", segs)
 	}
+	// Headings padded with space glyphs still split at the column.
+	padded := []pdf.Text{{X: 76, W: 90, S: "Teilnehmer/-innen:", FontSize: 10}}
+	for x := 166.0; x < 300; x += 3 {
+		padded = append(padded, pdf.Text{X: x, W: 3, S: " ", FontSize: 10})
+	}
+	padded = append(padded, pdf.Text{X: 303, W: 30, S: "Gäste:", FontSize: 10})
+	if segs := lineSegments(padded); len(segs) != 2 || segs[1].text != "Gäste:" {
+		t.Fatalf("padded headings: %+v", segs)
+	}
 	prose := []pdf.Text{{X: 98, W: 40, S: "Normaler", FontSize: 10}, {X: 138, W: 3, S: " ", FontSize: 10}, {X: 141, W: 30, S: "Text", FontSize: 10}}
 	if segs := lineSegments(prose); len(segs) != 1 {
 		t.Fatalf("prose split: %+v", segs)
@@ -121,5 +130,23 @@ func TestArrangeColumnsProse(t *testing.T) {
 	got := texts(arrangeColumns(lines))
 	if !strings.HasPrefix(got, left+"\n"+left+"\n¶"+right) {
 		t.Fatalf("prose columns: %q", got)
+	}
+}
+
+// Headings drawn as one text object are split onto the columns.
+func TestArrangeColumnsJoinedHeadings(t *testing.T) {
+	head := line(700, "76:Teilnehmer/-innen: Gäste:")
+	lines := []pdfLine{
+		head,
+		line(688, "76:Frau A", "303:Herr Gast"),
+		line(676, "76:Herr B", "303:Frau Gast"),
+		line(664, "76:Frau C"),
+	}
+	want := "Teilnehmer/-innen:\nFrau A\nHerr B\nFrau C\n¶Gäste:\nHerr Gast\nFrau Gast\n"
+	if got := texts(arrangeColumns(lines)); got != want {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+	if splitHeadings("Gemäß § 3: Die Sitzung beginnt um 10 Uhr: pünktlich", 2) != nil {
+		t.Error("sentence taken for headings")
 	}
 }

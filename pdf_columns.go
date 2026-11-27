@@ -63,14 +63,20 @@ func lineSegments(items []pdf.Text) []pdfSegment {
 		idx[i] = i
 	}
 	sort.SliceStable(idx, func(a, b int) bool { return items[idx[a]].X < items[idx[b]].X })
+	// Space glyphs do not extend a segment: some PDFs pad the gap between
+	// two column headings ("Teilnehmer/-innen:      Gäste:") with spaces,
+	// which would otherwise hide the column gap.
 	cluster := make([]int, len(items))
-	n, end := 0, items[idx[0]].X+items[idx[0]].W
-	for k, i := range idx {
-		if k > 0 && items[i].X-end > gap && strings.TrimSpace(items[i].S) != "" {
+	n, end := 0, math.Inf(-1)
+	for _, i := range idx {
+		blank := strings.TrimSpace(items[i].S) == ""
+		if !blank && !math.IsInf(end, -1) && items[i].X-end > gap {
 			n++
 		}
 		cluster[i] = n
-		end = math.Max(end, items[i].X+items[i].W)
+		if !blank {
+			end = math.Max(end, items[i].X+items[i].W)
+		}
 	}
 
 	segs := make([]pdfSegment, 0, n+1)
@@ -158,7 +164,15 @@ func arrangeColumns(lines []pdfLine) []pdfLine {
 			i++
 			continue
 		}
-		out = append(out, writeColumns(lines[i:j], cols, column)...)
+		// Column headings drawn as one text object ("Teilnehmer/-innen:
+		// Gäste:") arrive as one segment; split them onto the columns.
+		var heads []string
+		if n := len(out); n > 0 && len(out[n-1].segs) <= 1 {
+			if heads = splitHeadings(out[n-1].Text, len(cols)); heads != nil {
+				out = out[:n-1]
+			}
+		}
+		out = append(out, writeColumns(lines[i:j], cols, column, heads)...)
 		if j < len(lines) {
 			lines[j].brk = true // what follows the run is a new paragraph
 		}
@@ -171,7 +185,7 @@ func arrangeColumns(lines []pdfLine) []pdfLine {
 // short cells) stay row by row with " | " between cells, so a label keeps
 // its value; lists of unequal length, columns with their own headings and
 // running text in columns are written column by column.
-func writeColumns(run []pdfLine, cols []float64, column func(pdfSegment) int) []pdfLine {
+func writeColumns(run []pdfLine, cols []float64, column func(pdfSegment) int, heads []string) []pdfLine {
 	full, chars, cells, subheading := true, 0, 0, false
 	for r, l := range run {
 		if len(l.segs) != len(cols) {
@@ -188,18 +202,24 @@ func writeColumns(run []pdfLine, cols []float64, column func(pdfSegment) int) []
 	prose := cells > 0 && chars/cells >= proseSegmentChars
 
 	if full && !subheading && !prose {
-		rows := make([]pdfLine, len(run))
+		rows := make([]pdfLine, 0, len(run)+1)
+		if heads != nil {
+			rows = append(rows, pdfLine{y: run[0].y, Text: strings.Join(heads, " | "), brk: run[0].brk})
+		}
 		for r, l := range run {
 			parts := make([]string, len(l.segs))
 			for k, s := range l.segs {
 				parts[k] = s.text
 			}
-			rows[r] = pdfLine{y: l.y, Text: strings.Join(parts, " | "), brk: r == 0 && l.brk}
+			rows = append(rows, pdfLine{y: l.y, Text: strings.Join(parts, " | "), brk: r == 0 && l.brk && heads == nil})
 		}
 		return rows
 	}
 
 	byCol := make([][]pdfLine, len(cols))
+	for c, h := range heads {
+		byCol[c] = append(byCol[c], pdfLine{y: run[0].y, Text: h})
+	}
 	for _, l := range run {
 		for _, s := range l.segs {
 			c := column(s)
@@ -215,4 +235,27 @@ func writeColumns(run []pdfLine, cols []float64, column func(pdfSegment) int) []
 		out = append(out, col...)
 	}
 	return out
+}
+
+// splitHeadings splits a line made only of k headings ending in ":" (e.g.
+// "Teilnehmer/-innen: Gäste:") into those headings, or returns nil.
+func splitHeadings(text string, k int) []string {
+	if k < 2 || !strings.HasSuffix(strings.TrimSpace(text), ":") {
+		return nil
+	}
+	var heads []string
+	for _, part := range strings.SplitAfter(text, ":") {
+		if part = strings.TrimSpace(part); part != "" {
+			heads = append(heads, part)
+		}
+	}
+	if len(heads) != k {
+		return nil
+	}
+	for _, h := range heads {
+		if len([]rune(h)) > 40 || strings.Count(h, " ") > 3 {
+			return nil // a sentence with colons, not column headings
+		}
+	}
+	return heads
 }
