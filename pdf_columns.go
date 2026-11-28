@@ -20,6 +20,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -199,7 +200,9 @@ func writeColumns(run []pdfLine, cols []float64, column func(pdfSegment) int, he
 			}
 		}
 	}
-	prose := cells > 0 && chars/cells >= proseSegmentChars
+	// Long cells read like running text, unless a column holds figures:
+	// amounts next to long labels are a table.
+	prose := cells > 0 && chars/cells >= proseSegmentChars && !hasNumericColumn(run, len(cols), column)
 
 	if full && !subheading && !prose {
 		rows := make([]pdfLine, 0, len(run)+1)
@@ -256,4 +259,30 @@ func splitHeadings(text string, k int) []string {
 		}
 	}
 	return heads
+}
+
+// hasNumericColumn reports whether one column of the run consists mostly of
+// figures (amounts, dates, counts).
+func hasNumericColumn(run []pdfLine, n int, column func(pdfSegment) int) bool {
+	digits := make([]int, n)
+	other := make([]int, n)
+	for _, l := range run {
+		for _, s := range l.segs {
+			c := column(s) // every segment of a run has a column
+			for _, r := range s.text {
+				switch {
+				case unicode.IsDigit(r):
+					digits[c]++
+				case unicode.IsLetter(r):
+					other[c]++
+				}
+			}
+		}
+	}
+	for c := range n {
+		if digits[c] > 0 && digits[c] >= 2*other[c] {
+			return true
+		}
+	}
+	return false
 }

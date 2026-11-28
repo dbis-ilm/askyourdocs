@@ -218,3 +218,16 @@ func TestArrangeColumnsOffColumn(t *testing.T) {
 		t.Fatalf("off-column line: %+v", got)
 	}
 }
+
+// Long labels next to amounts stay a table, row by row.
+func TestArrangeColumnsLongLabelsWithAmounts(t *testing.T) {
+	lines := []pdfLine{
+		line(500, "50:Kooperationsprojekte und Zuweisungen aus Landesmitteln", "380:527.000 € 527.000 € 400.000 €"),
+		line(488, "50:Hochschulpakt 2020/Zukunftsvertrag SP 1 und SP 2", "380:3.352.154 € 3.352.154 € 3.153.545 €"),
+		line(476, "50:zentral vereinnahmte Gebühren/Gemeinkosten", "380:2.800.000 € 2.951.575 € 2.800.000 €"),
+	}
+	got := texts(arrangeColumns(lines))
+	if !strings.Contains(got, "Hochschulpakt 2020/Zukunftsvertrag SP 1 und SP 2 | 3.352.154 €") {
+		t.Fatalf("amounts lost their labels:\n%s", got)
+	}
+}

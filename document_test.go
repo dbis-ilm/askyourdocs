@@ -508,3 +508,66 @@ func TestHasTextLayer(t *testing.T) {
 		}
 	}
 }
+
+// Two text objects on one line (letterhead: name left, date right) keep a
+// space between them even when the line draws its own spaces.
+func TestRowTextSpaceBetweenTextObjects(t *testing.T) {
+	items := []pdf.Text{
+		{S: "TSV", X: 57, W: 20, FontSize: 11}, {S: " ", X: 77, W: 3, FontSize: 11}, {S: "e.V.", X: 80, W: 20, FontSize: 11},
+		{S: "Musterstadt,", X: 425, W: 60, FontSize: 10}, {S: " ", X: 485, W: 3, FontSize: 10}, {S: "05.08.2025", X: 488, W: 50, FontSize: 10},
+	}
+	if got := rowText(items); got != "TSV e.V. Musterstadt, 05.08.2025" {
+		t.Errorf("rowText = %q", got)
+	}
+	// Letters drawn one by one with tight spacing stay one word.
+	tight := []pdf.Text{{S: "W", X: 0, W: 8, FontSize: 10}, {S: "o", X: 8.2, W: 5, FontSize: 10}, {S: " ", X: 13.2, W: 3, FontSize: 10}, {S: "x", X: 16.2, W: 5, FontSize: 10}}
+	if got := rowText(tight); got != "Wo x" {
+		t.Errorf("tight rowText = %q", got)
+	}
+	// A width reported too small inside a word: "bez" + "eichnet" with a
+	// gap of 1.9 em stays one word; a bullet keeps its space.
+	torn := []pdf.Text{{S: "bez", X: 0, W: 10, FontSize: 10}, {S: "eichnet", X: 29, W: 30, FontSize: 10}, {S: " ", X: 59, W: 3, FontSize: 10}, {S: "•", X: 70, W: 4, FontSize: 10}, {S: "Diskussion", X: 86, W: 40, FontSize: 10}}
+	if got := rowText(torn); got != "bezeichnet • Diskussion" {
+		t.Errorf("torn rowText = %q", got)
+	}
+}
+
+// With two pages, a footer with a page count is dropped; other text that
+// starts both pages stays.
+func TestStripRunningLinesTwoPages(t *testing.T) {
+	pages := make([][]pdfLine, 2)
+	for i := range pages {
+		pages[i] = []pdfLine{
+			{y: 800, Text: "Beschluss: Der Ausschuss stimmt zu."},
+			{y: 700, Text: fmt.Sprintf("Inhalt von Seite %d.", i+1)},
+			{y: 650, Text: "Weiterer Inhalt."},
+			{y: 50, Text: fmt.Sprintf("Protokoll der 48. Sitzung · Seite %d von 2", i+1)},
+		}
+	}
+	stripRunningLines(pages)
+	for i, lines := range pages {
+		if len(lines) != 3 || lines[0].Text != "Beschluss: Der Ausschuss stimmt zu." {
+			t.Errorf("page %d: %v", i, lines)
+		}
+	}
+	single := [][]pdfLine{{{y: 700, Text: "Text"}, {y: 50, Text: "Seite 1 von 1"}}}
+	stripRunningLines(single)
+	if len(single[0]) != 2 {
+		t.Errorf("single page lost lines: %v", single[0])
+	}
+}
+
+// Without widths, items carry their text object's position; the jump to the
+// next object gets a space.
+func TestRowTextObjectPositionsWithoutWidths(t *testing.T) {
+	var items []pdf.Text
+	for _, r := range "TSV e.V." {
+		items = append(items, pdf.Text{S: string(r), X: 56.7, FontSize: 11})
+	}
+	for _, r := range "Musterstadt, 05.08.2025" {
+		items = append(items, pdf.Text{S: string(r), X: 425.2, FontSize: 10})
+	}
+	if got := rowText(items); got != "TSV e.V. Musterstadt, 05.08.2025" {
+		t.Errorf("rowText = %q", got)
+	}
+}

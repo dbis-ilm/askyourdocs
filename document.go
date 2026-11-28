@@ -257,14 +257,70 @@ func extractPageLines(p pdf.Page) []pdfLine {
 func rowText(items []pdf.Text) string {
 	for _, t := range items {
 		if t.S != "" && strings.TrimSpace(t.S) == "" {
-			var sb strings.Builder
-			for _, t := range items {
-				sb.WriteString(t.S)
-			}
-			return sb.String()
+			return joinWithSpaceGlyphs(items)
 		}
 	}
 	return buildRowText(items)
+}
+
+// A gap of wideGapFactor times the font size between the end of one item
+// and the start of the next is more than a word space: two text objects on
+// one line ("TSV Musterstadt e.V.     Musterstadt, 05.08.2025"), a bullet
+// and its text. Some PDFs report widths too small, so a letter followed by
+// a lowercase letter needs midWordGapFactor: that is nearly always a word
+// torn apart by a wrong width ("bez eichnet").
+const (
+	wideGapFactor    = 1.0
+	midWordGapFactor = 10.0
+)
+
+// midWord reports whether prev ends with a letter and next starts with a
+// lowercase letter.
+func midWord(prev, next string) bool {
+	last, _ := utf8.DecodeLastRuneInString(prev)
+	first, _ := utf8.DecodeRuneInString(next)
+	return unicode.IsLetter(last) && unicode.IsLower(first)
+}
+
+// joinWithSpaceGlyphs concatenates items of a line that draws its own
+// spaces. Separate text objects on the same line have no space glyph
+// between them, so a wide gap gets a space too.
+//
+// Some PDFs (fonts without width tables) report no widths, and every item
+// of a text object carries the object's start position. A jump in X then
+// marks the next text object, which gets a space as well.
+func joinWithSpaceGlyphs(items []pdf.Text) string {
+	same := 0
+	for j := 1; j < len(items); j++ {
+		if items[j].X == items[j-1].X {
+			same++
+		}
+	}
+	objectPositions := len(items) > 1 && 2*same >= len(items)-1
+	var sb strings.Builder
+	for j, t := range items {
+		if j > 0 {
+			prev := items[j-1]
+			fontSize := prev.FontSize
+			if fontSize <= 0 {
+				fontSize = 12
+			}
+			blank := strings.TrimSpace(prev.S) == "" || strings.TrimSpace(t.S) == ""
+			limit := wideGapFactor * fontSize
+			if midWord(prev.S, t.S) {
+				limit = midWordGapFactor * fontSize
+			}
+			switch {
+			case blank:
+			case prev.W > 0 && t.X-(prev.X+prev.W) > limit:
+				sb.WriteByte(' ')
+			case prev.W == 0 && objectPositions && t.X > prev.X:
+				sb.WriteByte(' ')
+			}
+		}
+		sb.WriteString(t.S)
+	}
+	return sb.String()
 }
 
 // linesToText joins lines into page text, separating them with a blank line
@@ -317,9 +373,13 @@ const runningLineCandidates = 3
 // so is a bare page number, which differs per page and therefore has to be
 // recognised by shape rather than by repetition.
 func stripRunningLines(pageLines [][]pdfLine) {
-	if len(pageLines) < 3 {
-		return // too few pages to tell a header from ordinary text
+	if len(pageLines) < 2 {
+		return
 	}
+	// With two pages, repetition alone cannot tell a header from text that
+	// happens to start both pages; only lines with a page marker ("Seite 1
+	// von 2") are dropped then.
+	twoPages := len(pageLines) == 2
 
 	counts := make(map[string]int)
 	for _, lines := range pageLines {
@@ -345,7 +405,11 @@ func stripRunningLines(pageLines [][]pdfLine) {
 		drop := make(map[int]bool)
 		for _, idx := range edgeIndices(len(lines)) {
 			text := lines[idx].Text
-			if isPageNumberLine(text) || counts[normalizeRunningLine(text)] >= minRepeats {
+			repeated := counts[normalizeRunningLine(text)] >= minRepeats
+			if twoPages {
+				repeated = repeated && pageMarkerRE.MatchString(text)
+			}
+			if isPageNumberLine(text) || repeated {
 				drop[idx] = true
 			}
 		}
@@ -386,6 +450,10 @@ func edgeIndices(n int) []int {
 	}
 	return idx
 }
+
+// pageMarkerRE matches a page count in a running line: "Seite 1 von 2",
+// "Page 3 of 12", "S. 2/5".
+var pageMarkerRE = regexp.MustCompile(`(?i)\b(seite|page|s\.)\s*\d+\s*(von|of|/)\s*\d+`)
 
 // normalizeRunningLine reduces a line to a form that compares equal across
 // pages: lowercased, whitespace collapsed, digits dropped. Dropping digits is
