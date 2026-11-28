@@ -272,6 +272,9 @@ func rowText(items []pdf.Text) string {
 const (
 	wideGapFactor    = 1.0
 	midWordGapFactor = 10.0
+	// estimatedWidth is a generous average character width in font sizes,
+	// for text objects without widths.
+	estimatedWidth = 0.6
 )
 
 // midWord reports whether prev ends with a letter and next starts with a
@@ -287,8 +290,10 @@ func midWord(prev, next string) bool {
 // between them, so a wide gap gets a space too.
 //
 // Some PDFs (fonts without width tables) report no widths, and every item
-// of a text object carries the object's start position. A jump in X then
-// marks the next text object, which gets a space as well.
+// of a text object carries the object's start position. The object's width
+// is then estimated from its characters; only a gap beyond that estimate
+// gets a space. A kerned word drawn in pieces ("T" "OP", "Kaf" "fee")
+// moves by about the width of the previous piece and stays one word.
 func joinWithSpaceGlyphs(items []pdf.Text) string {
 	same := 0
 	for j := 1; j < len(items); j++ {
@@ -297,8 +302,13 @@ func joinWithSpaceGlyphs(items []pdf.Text) string {
 		}
 	}
 	objectPositions := len(items) > 1 && 2*same >= len(items)-1
+	objStart, objChars := 0.0, 0   // current text object without widths
+	prevStart, prevChars := 0.0, 0 // the object before the current one
 	var sb strings.Builder
 	for j, t := range items {
+		if j == 0 || t.X != items[j-1].X {
+			objStart, objChars = t.X, 0
+		}
 		if j > 0 {
 			prev := items[j-1]
 			fontSize := prev.FontSize
@@ -314,10 +324,14 @@ func joinWithSpaceGlyphs(items []pdf.Text) string {
 			case blank:
 			case prev.W > 0 && t.X-(prev.X+prev.W) > limit:
 				sb.WriteByte(' ')
-			case prev.W == 0 && objectPositions && t.X > prev.X:
+			case prev.W == 0 && objectPositions && t.X != prev.X && t.X-(prevStart+estimatedWidth*float64(prevChars)*fontSize) > limit:
 				sb.WriteByte(' ')
 			}
 		}
+		if j+1 < len(items) && items[j+1].X != t.X {
+			prevStart, prevChars = objStart, objChars+utf8.RuneCountInString(t.S)
+		}
+		objChars += utf8.RuneCountInString(t.S)
 		sb.WriteString(t.S)
 	}
 	return sb.String()
@@ -654,12 +668,25 @@ func continuesParagraph(prev, next string) bool {
 	if strings.ContainsRune(".!?:;", last) {
 		return false
 	}
+	// A footer left on the page (an appended slide deck's "2 365. Senat,
+	// 13.01.2026 – International Office") is no sentence to continue.
+	// Footers are short; a full-width line with a date is running text.
+	lastLine := prev[strings.LastIndexByte(prev, '\n')+1:]
+	if utf8.RuneCountInString(lastLine) <= maxFooterChars && footerLikeRE.MatchString(lastLine) {
+		return false
+	}
 	if isProtocolTOP(next) || isNumberedSection(next) {
 		return false
 	}
 	first, _ := utf8.DecodeRuneInString(next)
 	return unicode.IsLetter(first) || first == '„' || first == '"' || first == '('
 }
+
+// maxFooterChars bounds a footer line; body lines run the full width.
+const maxFooterChars = 70
+
+// footerLikeRE matches what a footer carries: a date or a page count.
+var footerLikeRE = regexp.MustCompile(`\b\d{1,2}\.\d{1,2}\.\d{2,4}\b|(?i)\b(seite|page)\s*\d+`)
 
 // joinContinuation appends next to prev, closing a word that the page break
 // split across a hyphen.
