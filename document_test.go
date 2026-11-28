@@ -571,3 +571,45 @@ func TestRowTextObjectPositionsWithoutWidths(t *testing.T) {
 		t.Errorf("rowText = %q", got)
 	}
 }
+
+// A kerned word drawn in pieces without widths stays one word: each piece
+// starts about where the previous one ends.
+func TestRowTextKernedPiecesWithoutWidths(t *testing.T) {
+	pieces := []struct {
+		s string
+		x float64
+	}{{"T", 100}, {"OP", 106.5}, {" ", 121}, {"2", 124}, {" ", 130}, {"V", 133}, {"erschiedenes", 139.5}}
+	var items []pdf.Text
+	for _, p := range pieces {
+		for _, r := range p.s {
+			items = append(items, pdf.Text{S: string(r), X: p.x, FontSize: 12})
+		}
+	}
+	if got := rowText(items); got != "TOP 2 Verschiedenes" {
+		t.Errorf("rowText = %q", got)
+	}
+}
+
+// A page ending in a footer left in the text (dated, from an appended slide
+// deck) is not continued by the next page's text.
+func TestMergePageBreaksStopsAtFooter(t *testing.T) {
+	paras := []Paragraph{
+		{Text: "Zielsetzung der Maßnahmen", PageNum: 9},
+		{Text: "2 365. Senat, 13.01.2026 – International Office", PageNum: 9},
+		{Text: "Strategische Entwicklungsziele", PageNum: 10},
+		{Text: "Der Senat beauftragt das", PageNum: 10},
+		{Text: "Präsidium mit der Umsetzung.", PageNum: 11},
+	}
+	got := mergePageBreaks(paras)
+	if len(got) != 4 || got[2].PageNum != 10 || got[3].Text != "Der Senat beauftragt das Präsidium mit der Umsetzung." {
+		t.Fatalf("%+v", got)
+	}
+	// A full-width line with a date continues on the next page.
+	long := []Paragraph{
+		{Text: "In der Mitgliederversammlung (18.10.2022) wurde ausführlich und kontrovers auf", PageNum: 3},
+		{Text: "kritische Punkte hingewiesen.", PageNum: 4},
+	}
+	if got := mergePageBreaks(long); len(got) != 1 {
+		t.Fatalf("sentence not continued: %+v", got)
+	}
+}
